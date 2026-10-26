@@ -102,6 +102,26 @@ def test_self_message_never_triggers_reply(tmp_path):
     assert ui.sent == []
 
 
+def test_recent_outbound_echo_with_unknown_sender_never_triggers_reply(tmp_path):
+    agent, ui, llm = make_agent(tmp_path)
+    first = make_event("@AI 回声测试", external_id="echo-in")
+    assert agent.handle_event(first) is True
+    assert len(ui.sent) == 1
+
+    echo = MessageEvent(
+        account_id="a",
+        group_id="g",
+        group_name="测试群",
+        member_id="unknown",
+        member_name="unknown",
+        text=ui.sent[0].text,
+        external_message_id="echo-out",
+    )
+    assert agent.handle_event(echo) is False
+    assert len(llm.calls) == 1
+    assert len(ui.sent) == 1
+
+
 def test_send_block_is_not_recorded_as_answered(tmp_path):
     blocked, blocked_ui, blocked_llm = make_agent(tmp_path, allow_send=False)
     event = make_event("@AI 稍后可以回答吗", external_id="blocked-1")

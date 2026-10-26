@@ -33,6 +33,7 @@ class WeChatAgent:
         self.llm = llm or LLMClient(settings)
         self.policy = policy or ActionPolicy(settings, self.storage)
         self.stats = AgentStats()
+        self._recent_outbound: dict[str, float] = {}
 
     def ready(self) -> dict[str, str]:
         """Readiness check only. It never opens a conversation or sends text."""
@@ -58,6 +59,9 @@ class WeChatAgent:
 
     def handle_event(self, event: MessageEvent) -> bool:
         self.stats.seen += 1
+        self_event = self._is_self_event(event)
+        if self_event:
+            event.is_self = True
         event_id = self.storage.record_message(event)
         question_hash = self.storage.question_hash(event, self.settings.wechat_ai_aliases)
         claim = self.storage.claim_processing(
@@ -75,7 +79,7 @@ class WeChatAgent:
         # Keep raw messages for audit/retention.  AI-authored rows are not
         # member facts, otherwise the bot can recall its own answer as user
         # context on a later turn.
-        if claim.claimed and not self._is_self_event(event):
+        if claim.claimed and not self_event:
             self.storage.add_fact(
                 MemoryFact(
                     account_id=event.account_id,
@@ -135,6 +139,7 @@ class WeChatAgent:
             # model response or a dry-run audit entry alone is not an answer.
             self.ui.send(action)
             self.policy.mark_sent()
+            self._remember_outbound(reply.text)
             self.storage.finish_processing(claim.event_key, "sent", "sent", reply_text)
             self.stats.replied += 1
             return True
@@ -152,7 +157,27 @@ class WeChatAgent:
         if event.is_self:
             return True
         configured = self.settings.wechat_self_name.strip()
-        return bool(configured and event.member_name.casefold() == configured.casefold())
+        if configured and event.member_name.casefold() == configured.casefold():
+            return True
+        sender = event.member_name.strip().casefold()
+        if sender not in {"unknown", "我", "自己", "me", "you", "you (me)"}:
+            return False
+        self._expire_outbound()
+        return self._normalize_outbound(event.text) in self._recent_outbound
+
+    def _remember_outbound(self, text: str) -> None:
+        self._expire_outbound()
+        self._recent_outbound[self._normalize_outbound(text)] = time.monotonic()
+
+    def _expire_outbound(self) -> None:
+        cutoff = time.monotonic() - 300
+        self._recent_outbound = {
+            text: seen_at for text, seen_at in self._recent_outbound.items() if seen_at >= cutoff
+        }
+
+    @staticmethod
+    def _normalize_outbound(text: str) -> str:
+        return " ".join(text.casefold().split())
 
     def _extract_interest(self, event: MessageEvent, event_id: int | None) -> None:
         patterns = (
