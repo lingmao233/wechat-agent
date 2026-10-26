@@ -20,7 +20,7 @@
 
 ## 已验证结果
 
-- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**18 passed**。
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**19 passed**。
 - `python -m compileall -q src`：通过。
 - `python -m wechat_agent init-db`：输出 `database schema initialized`。
 - 本机已安装并可导入 `uiautomation==2.0.18`、`pyperclip`、`pytest`、`python-dotenv`。
