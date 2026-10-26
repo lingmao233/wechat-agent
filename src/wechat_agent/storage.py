@@ -110,6 +110,27 @@ class ReplyRecordRow(Base):
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PlatformActionRow(Base):
+    __tablename__ = "platform_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    action_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_id: Mapped[str] = mapped_column(String(128), index=True)
+    action_type: Mapped[str] = mapped_column(String(32), index=True)
+    target_id: Mapped[str] = mapped_column(String(256), index=True)
+    parent_comment_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    target_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(String(512), default="")
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessingClaim:
     event_key: str
@@ -356,6 +377,100 @@ class Storage:
             }
             for row in rows
         ]
+
+    def reserve_platform_action(
+        self,
+        *,
+        action_key: str,
+        platform: str,
+        account_id: str,
+        action_type: str,
+        target_id: str,
+        parent_comment_id: str | None,
+        text: str,
+        target_url: str | None,
+        dry_run: bool,
+        metadata: dict[str, object] | None = None,
+    ) -> tuple[dict[str, object], bool]:
+        now = utc_now()
+        with self.Session.begin() as session:
+            existing = session.scalar(
+                select(PlatformActionRow).where(PlatformActionRow.action_key == action_key)
+            )
+            if existing:
+                return self._platform_action_dict(existing), True
+            row = PlatformActionRow(
+                action_key=action_key,
+                platform=platform,
+                account_id=account_id,
+                action_type=action_type,
+                target_id=target_id,
+                parent_comment_id=parent_comment_id,
+                target_url=target_url,
+                text=text,
+                status="dry_run" if dry_run else "queued",
+                reason="dry_run_plan" if dry_run else "queued_for_review",
+                dry_run=dry_run,
+                metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.flush()
+            return self._platform_action_dict(row), False
+
+    def update_platform_action(
+        self,
+        action_key: str,
+        *,
+        status: str,
+        reason: str,
+        executed: bool = False,
+    ) -> None:
+        now = utc_now()
+        with self.Session.begin() as session:
+            row = session.scalar(
+                select(PlatformActionRow).where(PlatformActionRow.action_key == action_key)
+            )
+            if not row:
+                raise KeyError(f"platform_action_not_found:{action_key}")
+            row.status = status
+            row.reason = reason
+            row.updated_at = now
+            if executed:
+                row.executed_at = now
+
+    def recent_platform_actions(self, limit: int = 50) -> list[dict[str, object]]:
+        with self.Session() as session:
+            rows = list(
+                session.scalars(
+                    select(PlatformActionRow)
+                    .order_by(PlatformActionRow.updated_at.desc())
+                    .limit(max(1, min(limit, 200)))
+                )
+            )
+        return [self._platform_action_dict(row) for row in rows]
+
+    @staticmethod
+    def _platform_action_dict(row: PlatformActionRow) -> dict[str, object]:
+        return {
+            "id": row.id,
+            "action_key": row.action_key,
+            "platform": row.platform,
+            "account_id": row.account_id,
+            "action_type": row.action_type,
+            "target_id": row.target_id,
+            "parent_comment_id": row.parent_comment_id,
+            "target_url": row.target_url,
+            "text": row.text,
+            "status": row.status,
+            "reason": row.reason,
+            "dry_run": row.dry_run,
+            "metadata": json.loads(row.metadata_json or "{}"),
+            "created_at": _aware(row.created_at).isoformat(),
+            "updated_at": _aware(row.updated_at).isoformat(),
+            "executed_at": _aware(row.executed_at).isoformat() if row.executed_at else None,
+        }
 
     def add_fact(self, fact: MemoryFact) -> int:
         row = FactRow(

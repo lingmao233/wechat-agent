@@ -63,6 +63,7 @@ python -m wechat_agent --stop
 - `src/wechat_agent/storage.py`：消息、事实、绑定和动作审计
 - `src/wechat_agent/policy.py`：群白名单、@AI、主动回复和停机策略
 - `src/wechat_agent/desktop.py`：本地 Web 桌面控制台
+- `src/wechat_agent/platforms/`：抖音/小红书浏览、评论和回复的统一 dry-run 适配层
 - `docs/PLATFORM_ADAPTERS.md`：抖音/小红书适配接口与 dry-run 边界
 - `docs/DEPLOYMENT.md`：Windows 微信连接器与服务器核心的 24 小时拓扑
 - `tests/`：不连接微信的隔离、时间召回和策略测试

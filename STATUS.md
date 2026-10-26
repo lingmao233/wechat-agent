@@ -14,12 +14,13 @@
 | [`src/wechat_agent/llm.py`](src/wechat_agent/llm.py) | DeepSeek/OpenAI 兼容调用；没有 Key 时使用离线 stub |
 | [`src/wechat_agent/config.py`](src/wechat_agent/config.py) | `.env` 配置、30 天原文留存和 14/90/365 天半衰期参数 |
 | [`src/wechat_agent/desktop.py`](src/wechat_agent/desktop.py) | 本地 Web 桌面控制台：启动/停止、STOP、回复台账和动作审计 |
+| [`src/wechat_agent/platforms/`](src/wechat_agent/platforms/) | 抖音/小红书统一浏览、评论、回复接口；fixture dry-run 与平台动作幂等台账 |
 | [`migrations/001_pgvector.sql`](migrations/001_pgvector.sql) | PostgreSQL/pgvector 迁移草案 |
 | [`tests/`](tests/) | 记忆隔离、时间召回、去重、策略和无 Key stub 测试 |
 
 ## 已验证结果
 
-- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**13 passed**。
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**18 passed**。
 - `python -m compileall -q src`：通过。
 - `python -m wechat_agent init-db`：输出 `database schema initialized`。
 - 本机已安装并可导入 `uiautomation==2.0.18`、`pyperclip`、`pytest`、`python-dotenv`。
@@ -60,6 +61,7 @@
 - 在无模型密钥时生成 stub 回复。
 - 通过 `reply_records` 持久化事件幂等、已回答问题和失败重试状态。
 - 通过 `python -m wechat_agent desktop` 使用本地控制台查看状态、台账和审计。
+- 通过平台 dry-run 适配器验证浏览、评论/回复计划和幂等键；尚未连接真实平台浏览器会话。
 - 审计允许和拒绝的发送动作。
 - 用 STOP 文件停止监听。
 
@@ -70,6 +72,7 @@
 - 不能确认真实客户端中自动 @ 选择和发送后的成功回执。
 - 不能宣称已经接入 PostgreSQL 向量检索。
 - 不能宣称已经接入抖音、B 站、小红书采集或评论。
+- 不能宣称抖音或小红书真实评论/回复已经发送；当前只有离线 dry-run 计划。
 
 ## 下一步最小联调顺序
 

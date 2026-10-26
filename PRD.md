@@ -153,6 +153,7 @@ AI 别名由 `WECHAT_AI_ALIASES` 配置。消息包含别名时，必须进入�
 | `identity_bindings` | B 站/小红书等平台绑定关系 | 表结构已实现，绑定流程未接入微信命令 |
 | `action_audit` | 发送动作、@ 名单、允许/拒绝原因 | 已实现 |
 | `reply_records` | 入站事件幂等、问题去重、生成/发送状态 | 已实现 |
+| `platform_actions` | 抖音/小红书评论与回复计划、幂等键、dry-run/审核状态 | dry-run 台账已实现，真实浏览器执行未接入 |
 
 SQLite 用于本机原型；PostgreSQL+pgvector 迁移文件已准备，但真实向量写入和检索尚未完成。
 
@@ -164,6 +165,7 @@ SQLite 用于本机原型；PostgreSQL+pgvector 迁移文件已准备，但真�
 - `policy.py`：群白名单、成员白名单、`@AI` 规则、发送开关、速率熔断和 STOP。
 - `llm.py`：DeepSeek/OpenAI 兼容客户端和无密钥 stub。
 - `desktop.py`：本机 Web 桌面控制台，管理监听、STOP、台账和审计。
+- `platforms/`：抖音/小红书统一浏览、评论、回复接口和 dry-run 动作计划。
 - `main.py`：`ready`、`run`、`init-db`、`desktop` 和停机命令。
 
 ## 8. 验收标准

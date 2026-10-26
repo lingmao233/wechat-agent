@@ -40,3 +40,31 @@ CREATE INDEX IF NOT EXISTS reply_records_question_scope
 
 CREATE INDEX IF NOT EXISTS reply_records_updated_at
     ON reply_records (updated_at DESC);
+
+-- Platform comment/reply plans are separate from Weixin action_audit.  The
+-- default status is a dry-run plan and must be explicitly reviewed before any
+-- real browser adapter is allowed to execute it.
+CREATE TABLE IF NOT EXISTS platform_actions (
+    id BIGSERIAL PRIMARY KEY,
+    action_key VARCHAR(64) NOT NULL UNIQUE,
+    platform VARCHAR(32) NOT NULL,
+    account_id VARCHAR(128) NOT NULL,
+    action_type VARCHAR(32) NOT NULL,
+    target_id VARCHAR(256) NOT NULL,
+    parent_comment_id VARCHAR(256),
+    target_url VARCHAR(2048),
+    text TEXT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    reason VARCHAR(512) NOT NULL DEFAULT '',
+    dry_run BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    executed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS platform_actions_scope
+    ON platform_actions (platform, account_id, action_type, target_id, status);
+
+CREATE INDEX IF NOT EXISTS platform_actions_updated_at
+    ON platform_actions (updated_at DESC);
