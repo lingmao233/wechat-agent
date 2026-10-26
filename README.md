@@ -1,0 +1,61 @@
+# WeChat Agent（Weixin 4.1.x 原型）
+
+这是一个 Windows 本机原型，直接接入桌面版 Weixin 的测试群。它使用 `uiautomation` 读取可见消息并发送文本，记忆层使用 SQLAlchemy，支持 SQLite 本地试跑和 PostgreSQL 连接串。PostgreSQL 部署时可在迁移阶段加入 pgvector；当前原型先把群/成员隔离、事实版本和时间召回跑通。
+
+当前适配目标是 Weixin `4.1.x`。本机已核验到 `4.1.15.56`。原始 `wxauto` GitHub 项目声明支持 3.9.X，因此这里没有把它作为 4.1.x 运行时依赖；`LTEnjoy/easyChat` 的 README 明确列出 4.1.15 和群聊/@，但仓库没有可确认的开源许可证，本项目只参考其公开的版本选择和 UI 结构，不复制其代码。
+
+## 安全开关
+
+默认配置不会发送消息：
+
+- `WECHAT_ALLOW_SEND=false`
+- `WECHAT_GROUP_NAME` 为空时拒绝打开会话
+- 只处理 `WECHAT_GROUP_NAME` 指定的群
+- `state/STOP` 存在时立即停止监听
+- 所有发送动作写入 `action_audit`
+- 发送没有每日硬额度，但有每分钟异常速率熔断；白名单、审计和停机开关始终生效
+
+专用测试号准备好后，先复制 `.env.example` 为 `.env`，只填写测试群名称和模型密钥：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env：WECHAT_GROUP_NAME=你的测试群
+python -m pip install -r requirements.txt
+python -m wechat_agent init-db
+python -m wechat_agent ready
+```
+
+`ready` 只检查 Weixin 窗口，不打开群、不发送消息。确认窗口和群名称正确后，才显式开启发送：
+
+```powershell
+Remove-Item state/STOP -ErrorAction SilentlyContinue
+python -m wechat_agent run --allow-send
+```
+
+停止方式：
+
+```powershell
+python -m wechat_agent --stop
+```
+
+当前账号尚未进行真实发送测试。等专用测试号准备好后，先运行 `ready`，再做一条由你指定的测试群 @AI 消息回放；每一步都会先查看审计记录和运行日志。
+
+## 数据边界
+
+`messages` 保存原始消息 30 天；`memory_facts` 长期保存事实和画像，记录 `observed_at`、`valid_from`、`valid_to`、置信度、确认状态和来源事件；检索按 `account_id + group_id + member_id` 强制过滤。聊天、兴趣、稳定事实分别使用 14、90、365 天半衰期。
+
+平台账号绑定接口预留在 `identity_bindings`，绑定必须由群友明确确认；同一平台身份可以映射到多个群，但记忆和画像不会跨群直接混用。
+
+## 目录
+
+- `src/wechat_agent/weixin_ui.py`：Weixin 4.1.x UIAutomation 适配器
+- `src/wechat_agent/agent.py`：群消息、画像抽取、RAG 和回复编排
+- `src/wechat_agent/storage.py`：消息、事实、绑定和动作审计
+- `src/wechat_agent/policy.py`：群白名单、@AI、主动回复和停机策略
+- `tests/`：不连接微信的隔离、时间召回和策略测试
+
+## 已知限制
+
+- Weixin UI 结构随客户端版本变化；4.1.x 版本需在专用号上实测消息读取和发送。
+- UIAutomation 只能读取当前可见聊天内容，历史加载和媒体消息需要后续适配。
+- 个人微信账号存在平台协议和封禁风险；本项目不承诺普通个人微信群长期稳定运行。

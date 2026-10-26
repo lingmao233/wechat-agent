@@ -1,0 +1,37 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state, databases, logs, and debug output
+state/
+runtime/
+logs/
+*.log
+*.out
+*.db
+*.sqlite
+*.sqlite3
+@AutomationLog.txt
+
+# Browser login/session data and screenshots
+.playwright/
+playwright/.auth/
+browser-data/
+cookies/
+screenshots/
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
