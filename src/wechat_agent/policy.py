@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 from threading import Lock
 
 from .config import Settings
@@ -30,23 +31,33 @@ class ActionPolicy:
     def should_reply_to(self, event: MessageEvent) -> tuple[bool, str]:
         if not self.is_allowed_group(event.group_name):
             return False, "group_not_allowlisted"
-        if self.settings.wechat_self_name and event.member_name == self.settings.wechat_self_name:
+        if event.is_self:
+            return False, "self_message"
+        if self.settings.wechat_self_name and event.member_name.casefold() == self.settings.wechat_self_name.casefold():
             return False, "self_message"
         if self.settings.wechat_allowed_members and event.member_name not in self.settings.wechat_allowed_members:
             return False, "member_not_allowlisted"
-        aliases = [alias.casefold() for alias in self.settings.wechat_ai_aliases]
-        mentioned = any(alias in event.text.casefold() for alias in aliases)
+        mentioned = self._mentions_ai(event.text)
         if mentioned:
             return True, "ai_mentioned"
-        if not self.settings.wechat_proactive_reply:
-            return False, "proactive_disabled"
-        # The first live phase uses a conservative relevance gate. The LLM can
-        # later replace this with a classifier without changing the adapter.
-        if "?" in event.text or "？" in event.text or any(
-            token in event.text for token in ("谁", "怎么", "为什么", "求推荐", "有没有")
-        ):
-            return True, "proactive_relevance_gate"
-        return False, "not_relevant_enough"
+        # The operator explicitly requested addressed-only behavior.  A plain
+        # question is still a group message and must not invoke the model.
+        return False, "ai_not_mentioned"
+
+    def _mentions_ai(self, text: str) -> bool:
+        for raw_alias in self.settings.wechat_ai_aliases:
+            alias = raw_alias.strip()
+            if not alias:
+                continue
+            if alias.isascii() and alias.replace("_", "").isalnum():
+                # Prevent the default alias ``AI`` from matching words such as
+                # ``said`` while still accepting ``@AI`` and ``AI 你好``.
+                pattern = rf"(?<![A-Za-z0-9_])@?\s*{re.escape(alias)}(?![A-Za-z0-9_])"
+                if re.search(pattern, text, flags=re.IGNORECASE):
+                    return True
+            elif alias.casefold() in text.casefold():
+                return True
+        return False
 
     def authorize(self, action: OutboundAction) -> tuple[bool, str]:
         if self.is_stopped():

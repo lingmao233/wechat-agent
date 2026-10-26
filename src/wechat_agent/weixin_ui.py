@@ -21,6 +21,7 @@ class UiMessage:
     sender: str
     text: str
     fingerprint: str
+    is_self: bool = False
 
 
 class WeixinUiAdapter:
@@ -40,6 +41,8 @@ class WeixinUiAdapter:
         auto.SetGlobalSearchTimeout(1.5)
         self.window = None
         self._group_open = False
+        self._primed = False
+        self._seen_keys: set[str] = set()
 
     def connect(self) -> None:
         classes = [self.settings.wechat_window_class, "mmui::MainWindow", "Qt51514QWindowIcon"]
@@ -128,7 +131,14 @@ class WeixinUiAdapter:
                 continue
             sender = self._row_sender(row) or "unknown"
             fingerprint = hashlib.sha256(f"{sender}\x1f{text}".encode("utf-8")).hexdigest()
-            parsed.append(UiMessage(sender=sender, text=text, fingerprint=fingerprint))
+            parsed.append(
+                UiMessage(
+                    sender=sender,
+                    text=text,
+                    fingerprint=fingerprint,
+                    is_self=self._is_self_sender(sender),
+                )
+            )
         return parsed
 
     def poll(self, account_id: str, group_name: str | None = None) -> list[MessageEvent]:
@@ -139,9 +149,9 @@ class WeixinUiAdapter:
         events: list[MessageEvent] = []
         for msg in self.read_messages():
             key = f"{group}\x1f{msg.fingerprint}"
-            if key in _SEEN_MESSAGES:
+            if key in self._seen_keys:
                 continue
-            _SEEN_MESSAGES.add(key)
+            self._seen_keys.add(key)
             events.append(
                 MessageEvent(
                     account_id=account_id,
@@ -153,9 +163,28 @@ class WeixinUiAdapter:
                     observed_at=utc_now(),
                     source="weixin_ui_4.1",
                     external_message_id=msg.fingerprint,
+                    is_self=msg.is_self,
                 )
             )
+        if not self._primed and self.settings.wechat_skip_existing_on_start:
+            # The first visible page often contains historical rows.  Treat
+            # that snapshot as the startup baseline; only later polls can
+            # trigger the agent.  The durable reply ledger remains the second
+            # line of defence for rows seen during runtime and after restart.
+            self._primed = True
+            return []
+        self._primed = True
         return events
+
+    def _is_self_sender(self, sender: str) -> bool:
+        normalized = sender.strip().casefold()
+        configured = self.settings.wechat_self_name.strip().casefold()
+        if configured and normalized == configured:
+            return True
+        # Weixin commonly exposes the local sender as 我/自己/You instead of
+        # the account nickname.  This is only a trigger guard; the configured
+        # self name remains the authoritative match when available.
+        return normalized in {"我", "自己", "me", "you", "you (me)"}
 
     def _find_search(self):
         for name in ("搜索", "Search"):
@@ -213,6 +242,3 @@ class WeixinUiAdapter:
         except Exception:
             pass
         return ""
-
-
-_SEEN_MESSAGES: set[str] = set()

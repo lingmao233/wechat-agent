@@ -31,3 +31,17 @@ def test_ai_mention_always_enters_reply_path(tmp_path):
     should_reply, reason = ActionPolicy(settings, storage).should_reply_to(event)
     assert should_reply
     assert reason == "ai_mentioned"
+
+
+def test_ai_alias_does_not_match_inside_an_ordinary_word(tmp_path):
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'memory.db'}",
+        wechat_group_name="测试群",
+        wechat_ai_aliases=["AI"],
+    )
+    storage = Storage(settings)
+    storage.init_schema()
+    event = MessageEvent("a", "测试群", "测试群", "m", "成员", "I said this already")
+    should_reply, reason = ActionPolicy(settings, storage).should_reply_to(event)
+    assert not should_reply
+    assert reason == "ai_not_mentioned"

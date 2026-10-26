@@ -54,4 +54,13 @@ def test_message_hash_is_deduplicated(tmp_path):
     storage = Storage(settings)
     storage.init_schema()
     event = MessageEvent("a", "g", "群", "m", "成员", "你好")
-    assert storage.record_message(event) == storage.record_message(event)
+    reread = MessageEvent(
+        "a",
+        "g",
+        "群",
+        "m",
+        "成员",
+        "你好",
+        observed_at=event.observed_at + timedelta(seconds=2),
+    )
+    assert storage.record_message(event) == storage.record_message(reread)

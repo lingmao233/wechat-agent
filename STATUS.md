@@ -1,7 +1,7 @@
 # 微信 AI Agent 当前状态
 
 更新时间：2026-10-26  
-结论：**离线原型已完成，真实微信端到端联调尚未通过。** 当前没有发送微信消息、@、评论或私信。
+结论：**离线核心和本地桌面控制台已完成，真实微信端到端联调尚未通过。** 当前没有发送微信消息、@、评论或私信。
 
 ## 已完成的代码
 
@@ -9,16 +9,17 @@
 |---|---|
 | [`src/wechat_agent/weixin_ui.py`](src/wechat_agent/weixin_ui.py) | Weixin 4.1.x UIAutomation 适配器；窗口连接、打开群、读取可见文字、文本发送、@ 输入 |
 | [`src/wechat_agent/agent.py`](src/wechat_agent/agent.py) | 消息入库、聊天事实、简单兴趣抽取、时间召回、模型回复和动作编排 |
-| [`src/wechat_agent/storage.py`](src/wechat_agent/storage.py) | SQLite/PostgreSQL SQLAlchemy 表、原文留存、事实、身份绑定、动作审计、过期清理 |
-| [`src/wechat_agent/policy.py`](src/wechat_agent/policy.py) | 群白名单、成员白名单、`@AI` 必答、普通消息相关性门槛、发送开关、速率熔断、STOP 文件 |
+| [`src/wechat_agent/storage.py`](src/wechat_agent/storage.py) | SQLite/PostgreSQL SQLAlchemy 表、原文留存、事实、身份绑定、动作审计、过期清理、持久化 `reply_records` 事件幂等与问题去重 |
+| [`src/wechat_agent/policy.py`](src/wechat_agent/policy.py) | 群白名单、成员白名单、`@AI`/别名触发、普通消息跳过、发送开关、速率熔断、STOP 文件 |
 | [`src/wechat_agent/llm.py`](src/wechat_agent/llm.py) | DeepSeek/OpenAI 兼容调用；没有 Key 时使用离线 stub |
 | [`src/wechat_agent/config.py`](src/wechat_agent/config.py) | `.env` 配置、30 天原文留存和 14/90/365 天半衰期参数 |
+| [`src/wechat_agent/desktop.py`](src/wechat_agent/desktop.py) | 本地 Web 桌面控制台：启动/停止、STOP、回复台账和动作审计 |
 | [`migrations/001_pgvector.sql`](migrations/001_pgvector.sql) | PostgreSQL/pgvector 迁移草案 |
 | [`tests/`](tests/) | 记忆隔离、时间召回、去重、策略和无 Key stub 测试 |
 
 ## 已验证结果
 
-- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**6 passed**。
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**13 passed**。
 - `python -m compileall -q src`：通过。
 - `python -m wechat_agent init-db`：输出 `database schema initialized`。
 - 本机已安装并可导入 `uiautomation==2.0.18`、`pyperclip`、`pytest`、`python-dotenv`。
@@ -57,6 +58,8 @@
 - 生成聊天事实和简单兴趣事实。
 - 按时间半衰期和关键词召回。
 - 在无模型密钥时生成 stub 回复。
+- 通过 `reply_records` 持久化事件幂等、已回答问题和失败重试状态。
+- 通过 `python -m wechat_agent desktop` 使用本地控制台查看状态、台账和审计。
 - 审计允许和拒绝的发送动作。
 - 用 STOP 文件停止监听。
 
@@ -81,6 +84,7 @@
 ## 安全默认值
 
 - `WECHAT_ALLOW_SEND=false`
+- 普通消息不触发回复，必须包含 `WECHAT_AI_ALIASES` 中的别名
 - 必须设置 `WECHAT_GROUP_NAME`
 - `state/STOP` 存在时停止监听
 - 发送动作写入 `action_audit`

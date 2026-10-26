@@ -3,11 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, create_engine, delete, select
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, create_engine, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .config import Settings
@@ -82,6 +86,40 @@ class ActionRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class ReplyRecordRow(Base):
+    """Persistent idempotency and answer ledger for inbound messages."""
+
+    __tablename__ = "reply_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    question_hash: Mapped[str] = mapped_column(String(64), index=True)
+    account_id: Mapped[str] = mapped_column(String(128), index=True)
+    group_id: Mapped[str] = mapped_column(String(256), index=True)
+    group_name: Mapped[str] = mapped_column(String(256))
+    member_id: Mapped[str] = mapped_column(String(256), index=True)
+    member_name: Mapped[str] = mapped_column(String(256))
+    text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(String(512), default="")
+    reply_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), default="weixin_ui")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessingClaim:
+    event_key: str
+    question_hash: str
+    claimed: bool
+    is_new_event: bool
+    status: str
+    reason: str
+
+
 class Storage:
     def __init__(self, settings: Settings):
         url = settings.database_url
@@ -89,7 +127,8 @@ class Storage:
             db_path = url.removeprefix("sqlite:///")
             if db_path and db_path != ":memory:":
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.engine = create_engine(url, future=True)
+        engine_kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite:///") else {}
+        self.engine = create_engine(url, future=True, **engine_kwargs)
         self.Session = sessionmaker(self.engine, expire_on_commit=False)
         self.settings = settings
 
@@ -98,15 +137,26 @@ class Storage:
 
     @staticmethod
     def hash_event(event: MessageEvent) -> str:
+        # UI polling timestamps change on every scan.  A timestamp must never
+        # be part of the idempotency key, otherwise a restart can answer the
+        # same visible row again.
+        external_id = (event.external_message_id or "").strip()
+        stable_part = f"external:{external_id}" if external_id else f"text:{_normalize_text(event.text)}"
         raw = "\x1f".join(
             [
                 event.account_id,
                 event.group_id,
                 event.member_id,
-                event.text,
-                event.observed_at.isoformat(),
+                stable_part,
             ]
         )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def question_hash(event: MessageEvent, aliases: Iterable[str] = ()) -> str:
+        """Hash a normalized question for durable answer de-duplication."""
+        normalized = _normalize_question(event.text, aliases)
+        raw = "\x1f".join([event.account_id, event.group_id, event.member_id, normalized])
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def record_message(self, event: MessageEvent) -> int | None:
@@ -131,6 +181,181 @@ class Storage:
             session.add(row)
             session.flush()
             return row.id
+
+    def claim_processing(
+        self,
+        event: MessageEvent,
+        question_hash: str,
+        lease_seconds: int | None = None,
+    ) -> ProcessingClaim:
+        """Claim an inbound event or record why it must be skipped.
+
+        ``event_key`` prevents the same visible UI row from being processed
+        twice.  ``question_hash`` prevents a newly observed copy of a question
+        from receiving another answer after a successful send.  Only ``sent``
+        records block a question; skipped/failed records remain retryable.
+        """
+        event_key = self.hash_event(event)
+        now = utc_now()
+        lease = lease_seconds or getattr(self.settings, "wechat_processing_lease_seconds", 300)
+        try:
+            with self.Session.begin() as session:
+                existing = session.scalar(
+                    select(ReplyRecordRow).where(ReplyRecordRow.event_key == event_key)
+                )
+                if existing:
+                    retryable = existing.status == "failed" or existing.reason in {
+                        "sending_disabled",
+                        "stop_file_present",
+                        "circuit_breaker_rate",
+                    }
+                    stale = (
+                        existing.status == "processing"
+                        and (now - _aware(existing.updated_at)).total_seconds() > lease
+                    )
+                    if stale or retryable:
+                        existing.status = "processing"
+                        existing.reason = "processing_lease_expired" if stale else "retry_claimed"
+                        existing.attempt_count += 1
+                        existing.updated_at = now
+                        return ProcessingClaim(
+                            event_key,
+                            question_hash,
+                            True,
+                            False,
+                            "processing",
+                            "processing_lease_expired" if stale else "retry_claimed",
+                        )
+                    return ProcessingClaim(
+                        event_key,
+                        question_hash,
+                        False,
+                        False,
+                        existing.status,
+                        "event_already_processed",
+                    )
+
+                answered = session.scalar(
+                    select(ReplyRecordRow)
+                    .where(
+                        ReplyRecordRow.account_id == event.account_id,
+                        ReplyRecordRow.group_id == event.group_id,
+                        ReplyRecordRow.member_id == event.member_id,
+                        ReplyRecordRow.question_hash == question_hash,
+                        ReplyRecordRow.status == "sent",
+                    )
+                    .order_by(ReplyRecordRow.answered_at.desc())
+                    .limit(1)
+                )
+                if answered:
+                    session.add(
+                        ReplyRecordRow(
+                            event_key=event_key,
+                            question_hash=question_hash,
+                            account_id=event.account_id,
+                            group_id=event.group_id,
+                            group_name=event.group_name,
+                            member_id=event.member_id,
+                            member_name=event.member_name,
+                            text=event.text,
+                            status="skipped",
+                            reason="question_already_answered",
+                            reply_text=None,
+                            source=event.source,
+                            attempt_count=1,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    return ProcessingClaim(
+                        event_key, question_hash, False, True, "skipped", "question_already_answered"
+                    )
+
+                session.add(
+                    ReplyRecordRow(
+                        event_key=event_key,
+                        question_hash=question_hash,
+                        account_id=event.account_id,
+                        group_id=event.group_id,
+                        group_name=event.group_name,
+                        member_id=event.member_id,
+                        member_name=event.member_name,
+                        text=event.text,
+                        status="processing",
+                        reason="claimed",
+                        reply_text=None,
+                        source=event.source,
+                        attempt_count=1,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                return ProcessingClaim(event_key, question_hash, True, True, "processing", "claimed")
+        except IntegrityError:
+            # Another poller won the unique event_key race.  Treat that as a
+            # normal duplicate and leave the winner's state untouched.
+            with self.Session() as session:
+                existing = session.scalar(
+                    select(ReplyRecordRow).where(ReplyRecordRow.event_key == event_key)
+                )
+            if existing:
+                return ProcessingClaim(
+                    event_key, question_hash, False, False, existing.status, "event_already_processed"
+                )
+            raise
+
+    def finish_processing(
+        self,
+        event_key: str,
+        status: str,
+        reason: str,
+        reply_text: str | None = None,
+    ) -> None:
+        now = utc_now()
+        with self.Session.begin() as session:
+            row = session.scalar(select(ReplyRecordRow).where(ReplyRecordRow.event_key == event_key))
+            if not row:
+                return
+            row.status = status
+            row.reason = reason
+            row.reply_text = reply_text
+            row.updated_at = now
+            if status == "sent":
+                row.answered_at = now
+
+    def processing_summary(self) -> dict[str, int]:
+        with self.Session() as session:
+            rows = session.execute(
+                select(ReplyRecordRow.status, func.count(ReplyRecordRow.id)).group_by(ReplyRecordRow.status)
+            )
+            return {status: int(count) for status, count in rows}
+
+    def recent_reply_records(self, limit: int = 50) -> list[dict[str, object]]:
+        with self.Session() as session:
+            rows = list(
+                session.scalars(
+                    select(ReplyRecordRow)
+                    .order_by(ReplyRecordRow.updated_at.desc())
+                    .limit(max(1, min(limit, 200)))
+                )
+            )
+        return [
+            {
+                "event_key": row.event_key,
+                "question_hash": row.question_hash,
+                "group_name": row.group_name,
+                "member_name": row.member_name,
+                "text": row.text,
+                "status": row.status,
+                "reason": row.reason,
+                "reply_text": row.reply_text,
+                "attempt_count": row.attempt_count,
+                "created_at": _aware(row.created_at).isoformat(),
+                "updated_at": _aware(row.updated_at).isoformat(),
+                "answered_at": _aware(row.answered_at).isoformat() if row.answered_at else None,
+            }
+            for row in rows
+        ]
 
     def add_fact(self, fact: MemoryFact) -> int:
         row = FactRow(
@@ -238,6 +463,28 @@ class Storage:
                 )
             )
 
+    def recent_audits(self, limit: int = 50) -> list[dict[str, object]]:
+        with self.Session() as session:
+            rows = list(
+                session.scalars(
+                    select(ActionRow).order_by(ActionRow.created_at.desc()).limit(max(1, min(limit, 200)))
+                )
+            )
+        return [
+            {
+                "id": row.id,
+                "group_id": row.group_id,
+                "action_type": row.action_type,
+                "target_member_id": row.target_member_id,
+                "text": row.text,
+                "at_names": json.loads(row.at_names_json or "[]"),
+                "allowed": row.allowed,
+                "reason": row.reason,
+                "created_at": _aware(row.created_at).isoformat(),
+            }
+            for row in rows
+        ]
+
     def purge_expired_messages(self) -> int:
         with self.Session.begin() as session:
             result = session.execute(delete(MessageRow).where(MessageRow.expires_at < utc_now()))
@@ -263,6 +510,25 @@ class Storage:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "").casefold()
+    return " ".join(normalized.split())
+
+
+def _normalize_question(text: str, aliases: Iterable[str]) -> str:
+    normalized = _normalize_text(text)
+    for alias in sorted((item.strip() for item in aliases if item and item.strip()), key=len, reverse=True):
+        if alias.isascii() and alias.replace("_", "").isalnum():
+            pattern = rf"@?\s*\b{re.escape(alias.casefold())}\b"
+        else:
+            pattern = rf"@?\s*{re.escape(alias.casefold())}"
+        normalized = re.sub(pattern, " ", normalized, flags=re.IGNORECASE)
+    # Punctuation and spacing should not make an already answered question
+    # appear new.  ``\w`` keeps Chinese characters and alphanumerics.
+    compact = re.sub(r"[^\w\u4e00-\u9fff]+", "", normalized, flags=re.UNICODE)
+    return compact or normalized
 
 
 def _tokens(text: str) -> set[str]:

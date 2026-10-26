@@ -20,6 +20,7 @@ class MessageEvent:
     observed_at: datetime = field(default_factory=utc_now)
     source: str = "weixin_ui"
     external_message_id: str | None = None
+    is_self: bool = False
 
     @property
     def scope_key(self) -> tuple[str, str, str]:
