@@ -57,6 +57,14 @@ def test_desktop_http_status_and_token_guard(tmp_path):
         request = Request(url, headers={"Authorization": "Bearer secret-token"})
         with urlopen(request) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        for path in ("/api/platforms", "/api/platform-actions"):
+            platform_request = Request(
+                f"http://127.0.0.1:{server.server_port}{path}",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+            with urlopen(platform_request) as response:
+                platform_payload = json.loads(response.read().decode("utf-8"))
+            assert platform_payload is not None
         assert payload["phase"] == "stopped"
     finally:
         server.shutdown()

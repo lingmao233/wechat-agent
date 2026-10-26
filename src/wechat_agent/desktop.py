@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 from .agent import WeChatAgent
 from .config import Settings
+from .platforms.dry_run import DryRunPlatformAdapter
+from .platforms.service import PlatformService
 from .storage import Storage
 
 
@@ -33,6 +35,13 @@ class DesktopController:
         self._agent_factory = agent_factory
         self._storage = Storage(settings)
         self._storage.init_schema()
+        self._platforms = PlatformService(
+            self._storage,
+            {
+                "douyin": DryRunPlatformAdapter("douyin"),
+                "xiaohongshu": DryRunPlatformAdapter("xiaohongshu"),
+            },
+        )
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._agent: WeChatAgent | None = None
@@ -101,6 +110,12 @@ class DesktopController:
     def replies(self, limit: int = 50) -> list[dict[str, object]]:
         return self._storage.recent_reply_records(limit)
 
+    def platform_status(self) -> dict[str, dict[str, object]]:
+        return self._platforms.login_status()
+
+    def platform_actions(self, limit: int = 50) -> list[dict[str, object]]:
+        return self._platforms.actions(limit)
+
     def _run_agent(self) -> None:
         try:
             agent = self._agent_factory(self.settings)
@@ -147,6 +162,10 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.controller.audits())
         elif path == "/api/replies":
             self._send_json(self.server.controller.replies())
+        elif path == "/api/platforms":
+            self._send_json(self.server.controller.platform_status())
+        elif path == "/api/platform-actions":
+            self._send_json(self.server.controller.platform_actions())
         else:
             self._send_json({"error": "not_found"}, 404)
 
@@ -237,6 +256,7 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="card"><h2>状态</h2><pre id="status">加载中…</pre></div>
   <div class="card"><h2>回复台账</h2><pre id="replies">加载中…</pre></div>
   <div class="card"><h2>动作审计</h2><pre id="audit">加载中…</pre></div>
+  <div class="card"><h2>抖音 / 小红书</h2><pre id="platforms">加载中…</pre><pre id="platformActions">加载中…</pre></div>
   <script>
     async function get(path){const r=await fetch(path);return r.json()}
     async function post(path){await fetch(path,{method:'POST'});await refresh()}
@@ -244,6 +264,8 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById('status').textContent=JSON.stringify(await get('/api/status'),null,2);
       document.getElementById('replies').textContent=JSON.stringify(await get('/api/replies'),null,2);
       document.getElementById('audit').textContent=JSON.stringify(await get('/api/audit'),null,2);
+      document.getElementById('platforms').textContent=JSON.stringify(await get('/api/platforms'),null,2);
+      document.getElementById('platformActions').textContent=JSON.stringify(await get('/api/platform-actions'),null,2);
     }
     refresh();setInterval(refresh,3000);
   </script>
