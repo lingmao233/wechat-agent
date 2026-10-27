@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .config import Settings
-from .models import MemoryFact, MessageEvent, OutboundAction, utc_now
+from .models import ConversationMessage, MemoryFact, MessageEvent, OutboundAction, utc_now
 
 
 class Base(DeclarativeBase):
@@ -163,6 +163,14 @@ class Storage:
         # same visible row again.
         external_id = (event.external_message_id or "").strip()
         stable_part = f"external:{external_id}" if external_id else f"text:{_normalize_text(event.text)}"
+        quoted = event.reply_to
+        quote_part = ""
+        if quoted is not None and quoted.text.strip():
+            quote_part = "\x1fquote:" + _normalize_text(quoted.text)
+            if quoted.sender_name.strip():
+                quote_part += "\x1fsender:" + _normalize_text(quoted.sender_name)
+            if quoted.message_id and quoted.message_id.strip():
+                quote_part += "\x1fid:" + _normalize_text(quoted.message_id)
         raw = "\x1f".join(
             [
                 event.account_id,
@@ -171,13 +179,20 @@ class Storage:
                 stable_part,
             ]
         )
+        raw += quote_part
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
     def question_hash(event: MessageEvent, aliases: Iterable[str] = ()) -> str:
         """Hash a normalized question for durable answer de-duplication."""
         normalized = _normalize_question(event.text, aliases)
-        raw = "\x1f".join([event.account_id, event.group_id, event.member_id, normalized])
+        quoted = event.reply_to
+        quote_text = _normalize_text(quoted.text) if quoted is not None else ""
+        quote_sender = _normalize_text(quoted.sender_name) if quoted is not None else ""
+        quote_id = _normalize_text(quoted.message_id) if quoted is not None and quoted.message_id else ""
+        raw = "\x1f".join(
+            [event.account_id, event.group_id, event.member_id, normalized, quote_sender, quote_text, quote_id]
+        )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def record_message(self, event: MessageEvent) -> int | None:
@@ -377,6 +392,98 @@ class Storage:
             }
             for row in rows
         ]
+
+    def matches_recent_sent_reply(
+        self,
+        *,
+        account_id: str,
+        group_id: str,
+        text: str,
+        limit: int = 200,
+    ) -> bool:
+        """Detect a bot echo when UIA cannot identify the local sender.
+
+        The reply ledger survives listener restarts, unlike the in-memory
+        outbound cache.  Restricting the lookup to the same account and group
+        keeps a copied sentence from another conversation from becoming a
+        global self-message signal.
+        """
+
+        wanted = _normalize_text(text)
+        if not wanted:
+            return False
+        with self.Session() as session:
+            rows = session.scalars(
+                select(ReplyRecordRow.reply_text)
+                .where(
+                    ReplyRecordRow.account_id == account_id,
+                    ReplyRecordRow.group_id == group_id,
+                    ReplyRecordRow.status == "sent",
+                    ReplyRecordRow.reply_text.is_not(None),
+                )
+                .order_by(ReplyRecordRow.updated_at.desc())
+                .limit(max(1, min(int(limit), 500)))
+            )
+            return any(_normalize_text(value or "") == wanted for value in rows)
+
+    def recent_messages(
+        self,
+        *,
+        account_id: str,
+        group_id: str,
+        limit: int,
+        max_chars: int,
+        exclude_message_hash: str | None = None,
+    ) -> list[ConversationMessage]:
+        """Return a bounded, oldest-first window from one group.
+
+        Raw message retention already supplies the durable conversation window.
+        This method never crosses account or group boundaries and excludes the
+        triggering row so the caller can render the current question once.
+        """
+
+        bounded_limit = max(0, min(int(limit), 50))
+        bounded_chars = max(500, min(int(max_chars), 30_000))
+        if bounded_limit == 0 or bounded_chars <= 0:
+            return []
+        with self.Session() as session:
+            query = (
+                select(MessageRow)
+                .where(
+                    MessageRow.account_id == account_id,
+                    MessageRow.group_id == group_id,
+                )
+                .order_by(MessageRow.observed_at.desc(), MessageRow.id.desc())
+                .limit(bounded_limit + 1)
+            )
+            rows = list(session.scalars(query))
+
+        selected: list[ConversationMessage] = []
+        used = 0
+        for row in reversed(rows):
+            if exclude_message_hash and row.message_hash == exclude_message_hash:
+                continue
+            text = (row.text or "").strip()
+            if not text:
+                continue
+            remaining = bounded_chars - used
+            if remaining <= 0:
+                break
+            if len(text) > remaining:
+                text = text[:remaining].rstrip()
+            if not text:
+                continue
+            selected.append(
+                ConversationMessage(
+                    sender_name=row.member_name or "unknown",
+                    text=text,
+                    observed_at=_aware(row.observed_at),
+                )
+            )
+            used += len(text)
+            if len(selected) >= bounded_limit:
+                break
+        return selected
 
     def reserve_platform_action(
         self,

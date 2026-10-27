@@ -7,16 +7,16 @@
 
 | 文件 | 已完成内容 |
 |---|---|
-| [`src/wechat_agent/weixin_ui.py`](src/wechat_agent/weixin_ui.py) | Weixin 4.1.x UIAutomation 适配器；窗口连接、打开群、读取可见文字、文本发送、@ 输入 |
+| [`src/wechat_agent/weixin_ui.py`](src/wechat_agent/weixin_ui.py) | Weixin 4.1.x 适配器；优先用 WeChatDB `Listener` 按群 wxid 读取并解析成员唯一 ID/昵称，UIAutomation 只作为校验当前群后的回退，另负责窗口、引用读取和文本发送 |
 | [`src/wechat_agent/agent.py`](src/wechat_agent/agent.py) | 消息入库、聊天事实、简单兴趣抽取、时间召回、模型回复和动作编排 |
 | [`src/wechat_agent/storage.py`](src/wechat_agent/storage.py) | SQLite/PostgreSQL SQLAlchemy 表、原文留存、事实、身份绑定、动作审计、过期清理、持久化 `reply_records` 事件幂等与问题去重 |
-| [`src/wechat_agent/policy.py`](src/wechat_agent/policy.py) | 群白名单、成员白名单、`@AI`/别名触发、普通消息跳过、发送开关、速率熔断、STOP 文件 |
+| [`src/wechat_agent/policy.py`](src/wechat_agent/policy.py) | 群白名单、成员白名单、显式 @/开头名称/关键词触发、普通消息跳过、发送开关、速率熔断、STOP 文件 |
 | [`src/wechat_agent/llm.py`](src/wechat_agent/llm.py) | DeepSeek/OpenAI 兼容文字调用；没有 Key 时使用离线 stub |
-| [`src/wechat_agent/image.py`](src/wechat_agent/image.py) | 可选 OpenAI-compatible 生图调用；同一 agent 按意图路由文字模型或生图模型 |
+| [`src/wechat_agent/image.py`](src/wechat_agent/image.py) | 可选 OpenAI-compatible 生图调用；可直接上传阿里云 OSS 并返回公开或签名 URL |
 | [`src/wechat_agent/config.py`](src/wechat_agent/config.py) | `.env` 配置、30 天原文留存和 14/90/365 天半衰期参数 |
-| [`src/wechat_agent/desktop.py`](src/wechat_agent/desktop.py) | 本地 Web 桌面控制台：启动/停止、STOP、回复台账和动作审计 |
+| [`src/wechat_agent/desktop.py`](src/wechat_agent/desktop.py) | 本地 Web 桌面 UI：启动/停止、配置分组编辑并校验重载、实时事件/回复/审计、抖音/小红书操作 |
 | [`src/wechat_agent/platforms/`](src/wechat_agent/platforms/) | 抖音/小红书统一浏览、评论、回复接口；fixture dry-run、Playwright 可见浏览器、平台动作幂等台账、@ 白名单校验和挑战即停 |
-| [`src/wechat_agent/web_research.py`](src/wechat_agent/web_research.py) | DSH 同款 DeepSeek relay、Brave/Tavily/SearXNG 搜索、显式域名白名单正文抓取，以及当前已登录平台公开条目/评论的临时上下文 |
+| [`src/wechat_agent/web_research.py`](src/wechat_agent/web_research.py) | DSH 同款 DeepSeek relay、Brave/Tavily/SearXNG 搜索、公开网页正文抓取（可选域名收窄），以及当前已登录平台公开条目/评论的临时上下文 |
 | [`migrations/001_pgvector.sql`](migrations/001_pgvector.sql) | PostgreSQL/pgvector 迁移草案 |
 | [`tests/`](tests/) | 记忆隔离、时间召回、去重、策略和无 Key stub 测试 |
 
@@ -50,8 +50,8 @@
 
 1. 讲述人曾被启动，但最近一次进程检查没有发现 `Narrator.exe`。
 2. 微信登录页曾被识别为 `mmui::LoginWindow`，说明重启后没有处于可用聊天态。
-3. 进入主窗口后，当前 UIAutomation 查询只看到 `Qt51514QWindowIcon` 和渲染窗格，未稳定暴露适配器需要的 `MainView`。
-4. 因此 `python -m wechat_agent ready` 当前不能通过，尚未进入读取消息和发送验证阶段。
+3. 进入主窗口后，修改前的 UIAutomation 查询只看到 `Qt51514QWindowIcon` 和渲染窗格，未暴露适配器需要的 `MainView`；现已接入 `wechatauto-replica` 的 accessibility gate 热激活步骤。
+4. 依赖安装后需要重新运行 `python -m wechat_agent ready`；在重新核对前，仍不能宣称已经进入读取消息和发送验证阶段。
 
 ## 当前可以做什么
 
@@ -63,11 +63,14 @@
 - 在无模型密钥时生成 stub 回复。
 - 通过 `reply_records` 持久化事件幂等、已回答问题和失败重试状态。
 - 通过 `python -m wechat_agent desktop` 使用本地控制台查看状态、台账和审计。
+- 通过 `python -m wechat_agent desktop --open-browser` 或 `start_desktop_ui.cmd` 打开可操作桌面 UI；配置中心可以编辑 `.env`，保存后自动重载监听线程，事件面板每 2 秒刷新。
+- 微信监听已固定到 `WECHAT_GROUP_NAME` 对应的群 wxid；成员日志使用 `sender_username` 和联系人备注/昵称，不再把所有成员归为 `unknown`。`WECHAT_ALLOWED_MEMBERS` 按唯一 ID 校验。
 - 通过平台 dry-run 适配器验证浏览、评论/回复计划和幂等键；尚未连接真实平台浏览器会话。
 - 设置 `PLATFORM_BROWSER_ENABLED=true` 后，可在桌面控制台打开独立的抖音/小红书持久化浏览器，滚动读取公开内容和带稳定 DOM ID 的评论；评论/回复需 `PLATFORM_WRITE_ENABLED=true` 且二次确认。
 - `DOUYIN_MENTION_ALLOWLIST` 和 `XIAOHONGSHU_MENTION_ALLOWLIST` 只按平台唯一用户 ID 配置；动作请求必须同时提交 `mention_ids`，服务层只按 ID 核对并把已核对的 ID 写入动作元数据。
-- 设置 `WEB_SEARCH_ENABLED=true` 后，明确的实时/搜索类 @AI 问题可以调用 DSH 同款 `deepseek-search-api`（`POST /v1/tools/search`）、Brave、Tavily 或自建 SearXNG；网页正文继续使用本地 HTTP 和域名白名单。搜索结果和平台公开内容只进入当前回答上下文，不写入 `memory_facts`。
-- 设置 `IMAGE_MODEL_ENABLED=true` 并填写独立的 `IMAGE_MODEL_*` 后，同一个 agent 的生图意图会调用 `/v1/images/generations`；当前通过微信文本发送生成 URL 或本地文件路径。
+- 设置 `WEB_SEARCH_ENABLED=true` 后，明确的实时/搜索类 @AI 问题可以调用 DSH 同款 `deepseek-search-api`（`POST /v1/tools/search`）、Brave、Tavily 或自建 SearXNG；网页正文继续使用本地 HTTP。`WEB_FETCH_ALLOWED_DOMAINS` 留空时允许公开 HTTP(S) 网站，填写后才收窄范围；本机和内网地址仍会阻断。搜索结果和平台公开内容只进入当前回答上下文，不写入 `memory_facts`。
+- 设置 `IMAGE_MODEL_ENABLED=true` 并填写独立的 `IMAGE_MODEL_*` 后，同一个 agent 的生图意图会调用 `/v1/images/generations`；再开启 `IMAGE_UPLOAD_ENABLED=true` 并配置 `OSS_*` 后会直接上传 OSS，再回复公开或签名 URL。
+- 微信引用/回复消息会尽量解析为 `<wechat_reply_to>`，最近同群消息会进入 `<wechat_context>`；引用正文参与问题去重。
 - 审计允许和拒绝的发送动作。
 - 用 STOP 文件停止监听。
 
@@ -81,7 +84,8 @@
 - 不能宣称已经完成抖音或小红书真实账号登录后的页面选择器验收。
 - 不能宣称抖音或小红书真实评论/回复已经发送；当前需要专用账号逐平台扫码和人工确认。当前网络对小红书返回了“IP 存在风险”，连接器会停止，不会绕过。
 - 当前平台连接器只完成唯一 ID 的白名单校验和记录；抖音/小红书原生 @ 候选选择器仍需逐平台真实页面验收，带 `mention_ids` 的真实写入会安全阻断，不能把普通文本 `@昵称` 当作已确认的平台提及。
-- 联网搜索和公开平台读取仍是可选、受限的当前请求上下文能力；没有搜索配置、浏览器登录态或域名白名单时会回退到普通 AI 回复。DeepSeek relay 的健康检查已通过，但 wechat-agent 尚未做真实群端到端发送验收。
+- 联网搜索和公开平台读取仍是可选的当前请求上下文能力；没有搜索配置或浏览器登录态时会回退到普通 AI 回复，网页抓取可通过空域名列表允许公开站点或填写域名进一步收窄。DeepSeek relay 的健康检查已通过，但 wechat-agent 尚未做真实群端到端发送验收。微信引用解析和 OSS bucket 权限/URL 可访问性仍需用户本地实测。
+- 本次生图上传改为直连 OSS 后只完成静态依赖、配置和差异检查，未运行测试、模型调用或真实 OSS 上传；需要在本地填入 `.env` 后试验。
 
 ## 下一步最小联调顺序
 
@@ -96,7 +100,7 @@
 ## 安全默认值
 
 - `WECHAT_ALLOW_SEND=false`
-- 普通消息不触发回复，必须包含 `WECHAT_AI_ALIASES` 中的别名
+- 普通消息不触发回复；显式 @、消息开头名称或 `WECHAT_KEYWORDS` 命中才触发
 - 必须设置 `WECHAT_GROUP_NAME`
 - `state/STOP` 存在时停止监听
 - 发送动作写入 `action_audit`

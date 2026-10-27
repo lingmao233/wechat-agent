@@ -9,6 +9,24 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@dataclass(frozen=True, slots=True)
+class QuotedMessage:
+    """A message that the channel explicitly marks as being quoted/replied to."""
+
+    text: str
+    sender_name: str = ""
+    message_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationMessage:
+    """One bounded message from the current conversation's recent context."""
+
+    sender_name: str
+    text: str
+    observed_at: datetime | None = None
+
+
 @dataclass(slots=True)
 class MessageEvent:
     account_id: str
@@ -21,6 +39,7 @@ class MessageEvent:
     source: str = "weixin_ui"
     external_message_id: str | None = None
     is_self: bool = False
+    reply_to: QuotedMessage | None = None
 
     @property
     def scope_key(self) -> tuple[str, str, str]:

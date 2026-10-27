@@ -1,8 +1,8 @@
 # WeChat Agent（Weixin 4.1.x 原型）
 
-这是一个 Windows 本机原型，直接接入桌面版 Weixin 的测试群。它使用 `uiautomation` 读取可见消息并发送文本，记忆层使用 SQLAlchemy，支持 SQLite 本地试跑和 PostgreSQL 连接串。PostgreSQL 部署时可在迁移阶段加入 pgvector；当前原型先把群/成员隔离、事实版本和时间召回跑通。
+这是一个 Windows 本机原型，直接接入桌面版 Weixin 的测试群。它优先使用 `WeChatDB.Listener` 按群 wxid 读取消息、按 `sender_username` 解析成员，再由 `uiautomation`/`wechatauto-replica` 负责窗口校验和文本发送；数据库不可读时才回退到经过当前群校验的可见 UIA 消息。记忆层使用 SQLAlchemy，支持 SQLite 本地试跑和 PostgreSQL 连接串。PostgreSQL 部署时可在迁移阶段加入 pgvector；当前原型先把群/成员隔离、事实版本和时间召回跑通。
 
-当前适配目标是 Weixin `4.1.x`。本机已核验到 `4.1.15.56`。原始 `wxauto` GitHub 项目声明支持 3.9.X，因此这里没有把它作为 4.1.x 运行时依赖；`LTEnjoy/easyChat` 的 README 明确列出 4.1.15 和群聊/@，但仓库没有可确认的开源许可证，本项目只参考其公开的版本选择和 UI 结构，不复制其代码。
+当前适配目标是 Weixin `4.1.x`。本机已核验到 `4.1.15.56`。`wechatauto-replica==1.2.7.0` 会在冷启动只暴露 Qt 外壳时热激活微信进程内的 accessibility gate，再由本项目自己的适配器读取消息和发送文本。原始 `wxauto` GitHub 项目声明支持 3.9.X，因此这里没有把它作为 4.1.x 运行时依赖；`LTEnjoy/easyChat` 的 README 明确列出 4.1.15 和群聊/@，但仓库没有可确认的开源许可证，本项目只参考其公开的版本选择和 UI 结构，不复制其代码。
 
 ## 安全开关
 
@@ -11,34 +11,42 @@
 - `WECHAT_ALLOW_SEND=false`
 - `WECHAT_GROUP_NAME` 为空时拒绝打开会话
 - 只处理 `WECHAT_GROUP_NAME` 指定的群
+- 运行时优先通过 WeChatDB `Listener` 监听该群的唯一 wxid，不依赖微信当前停留在哪个聊天页；只有本地消息库不可读时才回退 UIAutomation，并先校验当前页确实是配置群
+- 群成员从消息行的 `sender_username` 解析微信唯一 ID，再用本地联系人表解析备注/昵称；`WECHAT_ALLOWED_MEMBERS` 只按这个 ID 校验
 - `state/STOP` 存在时立即停止监听
 - 所有发送动作写入 `action_audit`
 - 发送没有每日硬额度，但有每分钟异常速率熔断；白名单、审计和停机开关始终生效
-- 普通问句不会触发模型；只有 `@AI` 或配置的 AI 别名进入回复流程
+- 普通问句不会触发模型；只有显式 `@`、消息开头的 AI 名称或 `WECHAT_KEYWORDS` 命中才进入回复流程
 - 已成功回答的问题写入持久化 `reply_records`，重启后也不会重复回答
+- 默认加载 `personas/dafeiyu/SKILL.md` 作为大肥鱼口吻；可通过 `PERSONA_FILE` 替换为自定义 Markdown 人设
 
 专用测试号准备好后，先复制 `.env.example` 为 `.env`，只填写测试群名称和模型密钥：
 
 ```powershell
 Copy-Item .env.example .env
 # 编辑 .env：WECHAT_GROUP_NAME=你的测试群
+# 可选：WECHAT_ALLOWED_MEMBERS=成员微信唯一ID1,成员微信唯一ID2
 python -m pip install -r requirements.txt
 python -m wechat_agent init-db
 python -m wechat_agent ready
 ```
 
-`ready` 只检查 Weixin 窗口，不打开群、不发送消息。确认窗口和群名称正确后，才显式开启发送：
+`ready` 只检查 Weixin 窗口，不打开群、不发送消息。检查过程中如果只发现 `Qt51514QWindowIcon` 外壳，会先调用 `wechatauto-replica` 热激活 accessibility gate，再检查 `mmui::MainWindow`/`MainView`。确认窗口和群名称正确后，才显式开启发送：
 
 ```powershell
 Remove-Item state/STOP -ErrorAction SilentlyContinue
 python -m wechat_agent run --allow-send
 ```
 
-本机桌面控制台：
+本机桌面 UI（浏览器窗口）：
 
 ```powershell
 python -m wechat_agent desktop --open-browser
 ```
+
+打开后可以直接点击“启动监听 / 停止监听”，在“配置中心”编辑 `.env` 并保存重载，在“实时消息”查看轮询日志、回复去重台账和发送审计。页面每 2 秒自动刷新；关闭浏览器窗口不会停止后端，需在 UI 点击停止或创建 `state/STOP`。
+
+Windows 下也可以双击仓库根目录的 `start_desktop_ui.cmd`（或运行 `start_desktop_ui.ps1`）打开这个 UI。
 
 抖音和小红书浏览器连接默认关闭。需要启用时，在 `.env` 中设置
 `PLATFORM_BROWSER_ENABLED=true`，桌面控制台会分别打开两个持久化浏览器目录；评论和回复仍默认只入队，只有在
@@ -66,12 +74,16 @@ WEB_SEARCH_BASE_URL=http://192.168.20.38:8787/v1/tools
 WEB_SEARCH_API_KEY=lan
 WEB_SEARCH_MAX_RESULTS=5
 WEB_FETCH_ENABLED=true
-WEB_FETCH_ALLOWED_DOMAINS=example.com,docs.example.com
+WEB_FETCH_ALLOWED_DOMAINS=
 ```
 
-请求会发到 `POST /v1/tools/search`；网页正文继续使用本地 HTTP 和域名白名单，不使用 Exa 或官方 DeepSeek Messages 搜索。也可以选择 `brave`、`tavily` 或自建 `searxng`。搜索结果、网页正文和抖音/小红书公开评论只进入当前问题上下文，不写入群友长期画像。
+请求会发到 `POST /v1/tools/search`；网页正文继续使用本地 HTTP。`WEB_FETCH_ALLOWED_DOMAINS` 留空即可抓取所有公开 HTTP(S) 网站，填写后才会收窄范围；本机和内网地址仍会阻断。不使用 Exa 或官方 DeepSeek Messages 搜索。也可以选择 `brave`、`tavily` 或自建 `searxng`。搜索结果、网页正文和抖音/小红书公开评论只进入当前问题上下文，不写入群友长期画像。
 
 同一个 agent 还支持可选的第二个生图模型。把 `IMAGE_MODEL_ENABLED=true`、`IMAGE_MODEL_BASE_URL`、`IMAGE_MODEL_API_KEY` 和 `IMAGE_MODEL` 配好后，明确 @AI 的“生成图片/画一张/生图”消息会调用 `POST /v1/images/generations`，文字问题仍走 `LLM_*`。当前微信连接器会把生成 URL 作为文字发出，图片消息发送需要后续补 UI 适配。
+
+如果要让其他用户访问结果，可再开启 `IMAGE_UPLOAD_ENABLED=true`，配置阿里云 OSS。程序会把生成图片直接上传到 `OSS_BUCKET`，不经过其他应用网关；配置 `OSS_PUBLIC_BASE_URL` 时返回公开 URL，否则返回 OSS 签名 URL（由 `OSS_SIGNED_URL_TTL_SECONDS` 控制有效期）。`OSS_PREFIX` 下会使用 `wechat-agent/generated/` 目录保存对象。上传失败不会把本地路径伪装成公开链接。运行账号只需要目标 bucket 的最小上传和读取权限，真实密钥只放在运行机器的 `.env`。
+
+微信引用消息和最近同群消息会分别注入 `<wechat_reply_to>`、`<wechat_context>`，引用正文会参与问题去重。UIAutomation 没有暴露引用正文时只能按当前版本控件树做 best-effort 解析，需你本地实测。
 
 当 `PLATFORM_BROWSER_ENABLED=true` 且平台浏览器已人工登录时，群友明确询问“抖音/小红书”内容会读取当前公开条目和公开评论。遇到验证码、安全验证、IP 风险或登录失效会停止，不绕过平台限制。完整变量说明见 [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md)，候选 GitHub 项目核验见 [`docs/OPEN_SOURCE_RESEARCH.md`](docs/OPEN_SOURCE_RESEARCH.md)。
 

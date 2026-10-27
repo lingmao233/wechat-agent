@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 from threading import Lock
+import unicodedata
 
 from .config import Settings
 from .models import MessageEvent, OutboundAction
@@ -33,31 +34,82 @@ class ActionPolicy:
             return False, "group_not_allowlisted"
         if event.is_self:
             return False, "self_message"
-        if self.settings.wechat_self_name and event.member_name.casefold() == self.settings.wechat_self_name.casefold():
-            return False, "self_message"
-        if self.settings.wechat_allowed_members and event.member_name not in self.settings.wechat_allowed_members:
+        if self.settings.wechat_allowed_members and not self._member_is_allowed(event):
             return False, "member_not_allowlisted"
-        mentioned = self._mentions_ai(event.text)
-        if mentioned:
-            return True, "ai_mentioned"
+        trigger_reason = self._trigger_reason(event.text)
+        if trigger_reason:
+            return True, trigger_reason
         # The operator explicitly requested addressed-only behavior.  A plain
         # question is still a group message and must not invoke the model.
         return False, "ai_not_mentioned"
 
+    def _member_is_allowed(self, event: MessageEvent) -> bool:
+        """Check the Weixin unique ID; display names are not authorization keys."""
+
+        allowed = {
+            str(value).strip()
+            for value in self.settings.wechat_allowed_members
+            if str(value).strip()
+        }
+        return bool(event.member_id.strip()) and event.member_id.strip() in allowed
+
     def _mentions_ai(self, text: str) -> bool:
-        for raw_alias in self.settings.wechat_ai_aliases:
-            alias = raw_alias.strip()
+        return self._trigger_reason(text) is not None
+
+    def _trigger_reason(self, text: str) -> str | None:
+        """Return the trigger class for a message.
+
+        ``wechat_ai_aliases`` are addressing names.  They match an explicit
+        ``@name`` anywhere in the message or a name at the beginning.  They
+        deliberately do not match a name in the middle of ordinary prose, so
+        the bot's own sentence such as ``我是 AI`` cannot re-enter the loop.
+        ``wechat_keywords`` are the separate free-form keyword trigger and may
+        occur anywhere, matching the behaviour of the previously working bot.
+        """
+
+        value = self._normalize_trigger_text(text)
+        if not value:
+            return None
+        folded = value.casefold()
+        aliases = [*self.settings.wechat_ai_aliases]
+        # The logged-in nickname is also an address by default, matching the
+        # previously working bot's automatic self-name registration.
+        if self.settings.wechat_self_name.strip():
+            aliases.append(self.settings.wechat_self_name)
+        for raw_alias in aliases:
+            alias = self._normalize_trigger_text(raw_alias)
             if not alias:
                 continue
-            if alias.isascii() and alias.replace("_", "").isalnum():
-                # Prevent the default alias ``AI`` from matching words such as
-                # ``said`` while still accepting ``@AI`` and ``AI 你好``.
-                pattern = rf"(?<![A-Za-z0-9_])@?\s*{re.escape(alias)}(?![A-Za-z0-9_])"
-                if re.search(pattern, text, flags=re.IGNORECASE):
-                    return True
-            elif alias.casefold() in text.casefold():
-                return True
-        return False
+            escaped = re.escape(alias)
+            # WeChat may insert a special-width space after the mention.  It
+            # is normalized above, and punctuation/end-of-message closes the
+            # name so @AI助手 does not accidentally count as @AI.
+            mention_pattern = (
+                rf"(?<![\w@])@\s*{escaped}"
+                rf"(?=$|[\s,，。！？!?：:；;、()（）\[\]【】<>《》])"
+            )
+            if re.search(mention_pattern, value, flags=re.IGNORECASE):
+                return "ai_mentioned"
+            # A name without @ is accepted only as the message prefix.  This
+            # preserves the old bot's ``AI 你好`` form while rejecting
+            # ``我是 AI`` in an assistant response.
+            if folded.startswith(alias.casefold()):
+                return "ai_mentioned"
+
+        for raw_keyword in self.settings.wechat_keywords:
+            keyword = self._normalize_trigger_text(raw_keyword)
+            if keyword and keyword.casefold() in folded:
+                return "wechat_keyword"
+        return None
+
+    @staticmethod
+    def _normalize_trigger_text(text: object) -> str:
+        value = unicodedata.normalize("NFKC", str(text or ""))
+        # Remove zero-width formatting characters, then collapse all Unicode
+        # whitespace.  This covers the U+2005 spacing emitted by some WeChat
+        # UIA builds after an @ mention.
+        value = "".join(char for char in value if unicodedata.category(char) not in {"Cf"})
+        return " ".join(value.split()).strip()
 
     def authorize(self, action: OutboundAction) -> tuple[bool, str]:
         if self.is_stopped():

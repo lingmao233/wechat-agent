@@ -52,7 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "desktop":
         from .desktop import serve
 
-        serve(settings, open_browser=args.open_browser)
+        serve(
+            settings,
+            open_browser=args.open_browser,
+            config_path=Path(args.config).expanduser() if args.config else Path(".env"),
+        )
         return 0
 
     agent = WeChatAgent(settings)

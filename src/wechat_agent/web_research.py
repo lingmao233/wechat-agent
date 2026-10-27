@@ -36,7 +36,13 @@ class WebSource:
 
 
 class WebResearchClient:
-    """Search public sources and optionally fetch an explicit domain allowlist."""
+    """Search public sources and fetch public HTTP(S) pages.
+
+    An empty ``WEB_FETCH_ALLOWED_DOMAINS`` means all public hostnames are
+    accepted. A non-empty list can still narrow the scope when needed. Local,
+    loopback, link-local, reserved, and ``*.local`` hosts remain blocked so
+    this feature cannot become an accidental internal proxy.
+    """
 
     _SEARCH_HINTS = re.compile(
         r"最新|今天|现在|实时|查一下|搜索|联网|网址|链接|新闻|价格|天气|资料|来源|抖音|小红书|真的吗|什么时候|谁是|官网|教程|文档|下载",
@@ -188,7 +194,7 @@ class WebResearchClient:
         value used in DSH (``.../v1/tools``), and the concrete route is
         ``POST /search``.  Page retrieval deliberately stays in
         :meth:`_fetch_source`, so ``WEB_FETCH_*`` continues to enforce the
-        local HTTP allowlist and no URL is sent back through the relay.
+        local HTTP policy and no URL is sent back through the relay.
         """
         base = self.settings.web_search_base_url.strip()
         api_key = self.settings.web_search_api_key.strip()
@@ -323,6 +329,8 @@ class WebResearchClient:
         if address is not None and (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved):
             return False
         allowed = [item.casefold().strip().lstrip(".") for item in self.settings.web_fetch_allowed_domains]
+        if not allowed:
+            return True
         return any(host == domain or host.endswith("." + domain) for domain in allowed if domain)
 
     @staticmethod

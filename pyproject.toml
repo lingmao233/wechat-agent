@@ -17,6 +17,8 @@ dependencies = [
   "SQLAlchemy>=2.0.0",
   "psycopg[binary]>=3.2.0",
   "pgvector>=0.3.0",
+  "alibabacloud-oss-v2==1.4.0",
+  "wechatauto-replica==1.2.7.0; sys_platform == 'win32'",
   "uiautomation>=2.0.18; sys_platform == 'win32'",
   "playwright>=1.48.0",
 ]
