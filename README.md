@@ -40,6 +40,10 @@ python -m wechat_agent run --allow-send
 python -m wechat_agent desktop --open-browser
 ```
 
+抖音和小红书浏览器连接默认关闭。需要启用时，在 `.env` 中设置
+`PLATFORM_BROWSER_ENABLED=true`，桌面控制台会分别打开两个持久化浏览器目录；评论和回复仍默认只入队，只有在
+`PLATFORM_WRITE_ENABLED=true` 并在控制台二次确认后才会尝试发送。
+
 默认只监听 `127.0.0.1:8765`。需要从其他机器访问时，设置 `DESKTOP_TOKEN`，再通过反向代理暴露；控制台的启动、停止、回复台账和动作审计都使用同一套发送策略。
 
 停止方式：
@@ -63,8 +67,8 @@ python -m wechat_agent --stop
 - `src/wechat_agent/storage.py`：消息、事实、绑定和动作审计
 - `src/wechat_agent/policy.py`：群白名单、@AI、主动回复和停机策略
 - `src/wechat_agent/desktop.py`：本地 Web 桌面控制台
-- `src/wechat_agent/platforms/`：抖音/小红书浏览、评论和回复的统一 dry-run 适配层
-- `docs/PLATFORM_ADAPTERS.md`：抖音/小红书适配接口与 dry-run 边界
+- `src/wechat_agent/platforms/`：抖音/小红书统一适配层；默认 dry-run，可显式开启 Playwright 可见浏览器
+- `docs/PLATFORM_ADAPTERS.md`：抖音/小红书浏览器登录、滚动读取、评论队列和安全边界
 - `docs/DEPLOYMENT.md`：Windows 微信连接器与服务器核心的 24 小时拓扑
 - `tests/`：不连接微信的隔离、时间召回和策略测试
 

@@ -440,6 +440,16 @@ class Storage:
             if executed:
                 row.executed_at = now
 
+    def platform_action(self, action_key: str) -> dict[str, object]:
+        """Return one platform action for an explicit operator approval."""
+        with self.Session() as session:
+            row = session.scalar(
+                select(PlatformActionRow).where(PlatformActionRow.action_key == action_key)
+            )
+            if not row:
+                raise KeyError(f"platform_action_not_found:{action_key}")
+            return self._platform_action_dict(row)
+
     def recent_platform_actions(self, limit: int = 50) -> list[dict[str, object]]:
         with self.Session() as session:
             rows = list(

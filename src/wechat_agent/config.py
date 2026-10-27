@@ -43,6 +43,21 @@ class Settings(BaseSettings):
     desktop_port: int = Field(default=8765, ge=1, le=65535)
     desktop_token: str = ""
 
+    # Public-platform browser connector.  It is deliberately opt-in: the
+    # offline adapters remain the default until an operator explicitly turns
+    # on a visible, persistent browser session on the desktop host.
+    platform_browser_enabled: bool = False
+    platform_browser_data_dir: Path = Path("browser-data")
+    platform_browser_executable: str | None = None
+    platform_browser_headless: bool = False
+    douyin_account_id: str = "unbound"
+    xiaohongshu_account_id: str = "unbound"
+    platform_browser_scroll_steps: int = Field(default=5, ge=1, le=20)
+    platform_browser_page_timeout_ms: int = Field(default=20_000, ge=5_000, le=120_000)
+    platform_write_enabled: bool = False
+    platform_action_delay_seconds: float = Field(default=30.0, ge=0, le=86_400)
+    platform_max_actions_per_hour: int = Field(default=5, ge=1, le=100)
+
     database_url: str = "sqlite:///state/memory.db"
     raw_retention_days: int = Field(default=30, ge=1)
     chat_half_life_days: float = Field(default=14, gt=0)

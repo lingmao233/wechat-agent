@@ -10,7 +10,7 @@ from ..storage import Storage
 
 
 class PlatformService:
-    """Registry and dry-run action planner for public platform adapters."""
+    """Registry, browser lifecycle, and guarded action planner."""
 
     def __init__(self, storage: Storage, adapters: Mapping[PlatformName, PlatformAdapter]):
         self.storage = storage
@@ -24,6 +24,20 @@ class PlatformService:
 
     def login_status(self) -> dict[str, dict[str, object]]:
         return {name: adapter.login_status() for name, adapter in self.adapters.items()}
+
+    def open(self, platform: PlatformName) -> dict[str, object]:
+        adapter = self.adapter(platform)
+        opener = getattr(adapter, "open", None)
+        if not callable(opener):
+            return adapter.login_status()
+        return opener()
+
+    def close(self, platform: PlatformName) -> dict[str, object]:
+        adapter = self.adapter(platform)
+        closer = getattr(adapter, "close", None)
+        if callable(closer):
+            closer()
+        return adapter.login_status()
 
     def browse(self, platform: PlatformName, query: str = "", limit: int = 20) -> list[BrowseItem]:
         return self.adapter(platform).browse(query=query, limit=limit)
@@ -61,6 +75,48 @@ class PlatformService:
 
     def actions(self, limit: int = 50) -> list[dict[str, object]]:
         return self.storage.recent_platform_actions(limit)
+
+    def execute(self, action_key: str, *, confirm: bool = False) -> dict[str, object]:
+        """Execute one queued action after an explicit local confirmation.
+
+        A dry-run record can never be upgraded into a real write.  Callers
+        must first plan with ``dry_run=False`` (which creates a queued record),
+        then call this method with ``confirm=True``.  The adapter itself still
+        enforces the platform write switch, rate limit, challenge stop, and
+        visible-page confirmation.
+        """
+        if not confirm:
+            raise ValueError("platform_action_confirmation_required")
+        record = self.storage.platform_action(action_key)
+        if bool(record["dry_run"]):
+            raise ValueError("dry_run_action_cannot_be_executed")
+        if str(record["status"]) not in {"queued", "approved"}:
+            raise ValueError(f"platform_action_not_queued:{record['status']}")
+        adapter = self.adapter(str(record["platform"]))
+        executor = getattr(adapter, "execute_action", None)
+        if not callable(executor):
+            raise ValueError("platform_browser_executor_unavailable")
+        self.storage.update_platform_action(
+            action_key,
+            status="executing",
+            reason="operator_confirmed",
+        )
+        try:
+            result = executor(record)
+        except Exception as exc:
+            self.storage.update_platform_action(
+                action_key,
+                status="failed",
+                reason=f"{type(exc).__name__}:{str(exc)[:400]}",
+            )
+            raise
+        self.storage.update_platform_action(
+            action_key,
+            status="sent",
+            reason="visible_page_confirmed",
+            executed=True,
+        )
+        return {"action_key": action_key, "status": "sent", "result": result}
 
     def _reserve(self, action: PlatformAction) -> ActionReceipt:
         action_key = action_key_for(action)

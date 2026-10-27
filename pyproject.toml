@@ -18,6 +18,7 @@ dependencies = [
   "psycopg[binary]>=3.2.0",
   "pgvector>=0.3.0",
   "uiautomation>=2.0.18; sys_platform == 'win32'",
+  "playwright>=1.48.0",
 ]
 
 [project.scripts]

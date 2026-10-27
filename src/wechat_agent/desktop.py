@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from .agent import WeChatAgent
 from .config import Settings
+from .platforms.browser import BrowserPlatformAdapter
 from .platforms.dry_run import DryRunPlatformAdapter
 from .platforms.service import PlatformService
 from .storage import Storage
@@ -35,12 +36,41 @@ class DesktopController:
         self._agent_factory = agent_factory
         self._storage = Storage(settings)
         self._storage.init_schema()
-        self._platforms = PlatformService(
-            self._storage,
-            {
+        if settings.platform_browser_enabled:
+            adapters = {
+                "douyin": BrowserPlatformAdapter(
+                    "douyin",
+                    data_dir=settings.platform_browser_data_dir,
+                    executable_path=settings.platform_browser_executable,
+                    account_id=settings.douyin_account_id,
+                    headless=settings.platform_browser_headless,
+                    scroll_steps=settings.platform_browser_scroll_steps,
+                    page_timeout_ms=settings.platform_browser_page_timeout_ms,
+                    write_enabled=settings.platform_write_enabled,
+                    action_delay_seconds=settings.platform_action_delay_seconds,
+                    max_actions_per_hour=settings.platform_max_actions_per_hour,
+                ),
+                "xiaohongshu": BrowserPlatformAdapter(
+                    "xiaohongshu",
+                    data_dir=settings.platform_browser_data_dir,
+                    executable_path=settings.platform_browser_executable,
+                    account_id=settings.xiaohongshu_account_id,
+                    headless=settings.platform_browser_headless,
+                    scroll_steps=settings.platform_browser_scroll_steps,
+                    page_timeout_ms=settings.platform_browser_page_timeout_ms,
+                    write_enabled=settings.platform_write_enabled,
+                    action_delay_seconds=settings.platform_action_delay_seconds,
+                    max_actions_per_hour=settings.platform_max_actions_per_hour,
+                ),
+            }
+        else:
+            adapters = {
                 "douyin": DryRunPlatformAdapter("douyin"),
                 "xiaohongshu": DryRunPlatformAdapter("xiaohongshu"),
-            },
+            }
+        self._platforms = PlatformService(
+            self._storage,
+            adapters,
         )
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
@@ -116,6 +146,54 @@ class DesktopController:
     def platform_actions(self, limit: int = 50) -> list[dict[str, object]]:
         return self._platforms.actions(limit)
 
+    def open_platform(self, platform: str) -> dict[str, object]:
+        return self._platforms.open(platform)  # type: ignore[arg-type]
+
+    def close_platform(self, platform: str) -> dict[str, object]:
+        return self._platforms.close(platform)  # type: ignore[arg-type]
+
+    def browse_platform(self, platform: str, query: str = "", limit: int = 20) -> list[dict[str, object]]:
+        return [
+            asdict(item)
+            for item in self._platforms.browse(platform, query=query, limit=limit)  # type: ignore[arg-type]
+        ]
+
+    def read_platform_comments(self, platform: str, item_id: str, limit: int = 50) -> list[dict[str, object]]:
+        return [
+            asdict(comment)
+            for comment in self._platforms.read_comments(platform, item_id=item_id, limit=limit)  # type: ignore[arg-type]
+        ]
+
+    def plan_platform_action(self, payload: dict[str, object]) -> dict[str, object]:
+        platform = str(payload.get("platform") or "")
+        action_type = str(payload.get("action_type") or "")
+        text = str(payload.get("text") or "")
+        dry_run = bool(payload.get("dry_run", True))
+        if action_type == "comment":
+            receipt = self._platforms.plan_comment(
+                platform, str(payload.get("item_id") or ""), text, dry_run=dry_run  # type: ignore[arg-type]
+            )
+        elif action_type == "reply":
+            receipt = self._platforms.plan_reply(
+                platform, str(payload.get("comment_id") or ""), text, dry_run=dry_run  # type: ignore[arg-type]
+            )
+        else:
+            raise ValueError("unsupported_platform_action_type")
+        return asdict(receipt)
+
+    def execute_platform_action(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._platforms.execute(
+            str(payload.get("action_key") or ""),
+            confirm=bool(payload.get("confirm")),
+        )
+
+    def close_platforms(self) -> None:
+        for platform in ("douyin", "xiaohongshu"):
+            try:
+                self._platforms.close(platform)  # type: ignore[arg-type]
+            except Exception:
+                pass
+
     def _run_agent(self) -> None:
         try:
             agent = self._agent_factory(self.settings)
@@ -173,16 +251,57 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path = urlparse(self.path).path
-        if path == "/api/start":
-            payload = self.server.controller.start()
-        elif path == "/api/stop":
-            payload = self.server.controller.stop()
-        elif path == "/api/clear-stop":
-            payload = self.server.controller.clear_stop()
-        else:
-            self._send_json({"error": "not_found"}, 404)
+        try:
+            body = self._read_json_body()
+            if path == "/api/start":
+                payload = self.server.controller.start()
+            elif path == "/api/stop":
+                payload = self.server.controller.stop()
+            elif path == "/api/clear-stop":
+                payload = self.server.controller.clear_stop()
+            elif path == "/api/platforms/open":
+                payload = self.server.controller.open_platform(str(body.get("platform") or ""))
+            elif path == "/api/platforms/close":
+                payload = self.server.controller.close_platform(str(body.get("platform") or ""))
+            elif path == "/api/platforms/browse":
+                payload = self.server.controller.browse_platform(
+                    str(body.get("platform") or ""),
+                    query=str(body.get("query") or ""),
+                    limit=int(body.get("limit", 20)),
+                )
+            elif path == "/api/platform-comments":
+                payload = self.server.controller.read_platform_comments(
+                    str(body.get("platform") or ""),
+                    str(body.get("item_id") or ""),
+                    limit=int(body.get("limit", 50)),
+                )
+            elif path == "/api/platform-actions/plan":
+                payload = self.server.controller.plan_platform_action(body)
+            elif path == "/api/platform-actions/execute":
+                payload = self.server.controller.execute_platform_action(body)
+            else:
+                self._send_json({"error": "not_found"}, 404)
+                return
+        except (ValueError, KeyError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
+        except Exception as exc:  # surfaced as a bounded connector error
+            self._send_json({"error": f"{type(exc).__name__}: {str(exc)[:500]}"}, 409)
             return
         self._send_json(payload)
+
+    def _read_json_body(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(min(length, 1_000_000))
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid_json_body") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("json_body_must_be_object")
+        return decoded
 
     def _authorized(self) -> bool:
         token = self.server.token
@@ -234,6 +353,7 @@ def serve(settings: Settings, *, open_browser: bool = False) -> None:
         pass
     finally:
         server.controller.stop()
+        server.controller.close_platforms()
         server.server_close()
 
 
@@ -256,10 +376,28 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="card"><h2>状态</h2><pre id="status">加载中…</pre></div>
   <div class="card"><h2>回复台账</h2><pre id="replies">加载中…</pre></div>
   <div class="card"><h2>动作审计</h2><pre id="audit">加载中…</pre></div>
-  <div class="card"><h2>抖音 / 小红书</h2><pre id="platforms">加载中…</pre><pre id="platformActions">加载中…</pre></div>
+  <div class="card"><h2>抖音 / 小红书</h2>
+    <p class="muted">浏览器会在本机打开并保留独立登录态。评论/回复先进入队列，必须再次确认后才会尝试发送。</p>
+    <button onclick="platformOpen('douyin')">打开抖音</button>
+    <button onclick="platformOpen('xiaohongshu')">打开小红书</button>
+    <button onclick="platformBrowse('douyin')">滚动读取抖音</button>
+    <button onclick="platformBrowse('xiaohongshu')">滚动读取小红书</button>
+    <button onclick="platformComments()">读取当前条目评论</button>
+    <button onclick="platformPlan('comment')">计划评论</button>
+    <button onclick="platformPlan('reply')">计划回复</button>
+    <button onclick="platformExecute()">确认执行队列动作</button>
+    <pre id="platforms">加载中…</pre><pre id="platformItems">尚未读取内容</pre><pre id="platformComments">尚未读取评论</pre><pre id="platformActions">加载中…</pre>
+  </div>
   <script>
+    let lastItems=[],lastComments=[];
     async function get(path){const r=await fetch(path);return r.json()}
     async function post(path){await fetch(path,{method:'POST'});await refresh()}
+    async function postJson(path, body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+    async function platformOpen(platform){try{await postJson('/api/platforms/open',{platform});await refresh()}catch(e){alert(e.message)}}
+    async function platformBrowse(platform){try{const query=prompt('关键词（留空读取推荐流）','')??'';lastItems=await postJson('/api/platforms/browse',{platform,query,limit:20});document.getElementById('platformItems').textContent=JSON.stringify(lastItems,null,2);await refresh()}catch(e){alert(e.message)}}
+    async function platformComments(){try{if(!lastItems.length)throw new Error('先读取内容');const platform=prompt('平台：douyin 或 xiaohongshu',lastItems[0].platform)||lastItems[0].platform;const itemId=prompt('条目 ID',lastItems[0].item_id);lastComments=await postJson('/api/platform-comments',{platform,item_id:itemId,limit:50});document.getElementById('platformComments').textContent=JSON.stringify(lastComments,null,2)}catch(e){alert(e.message)}}
+    async function platformPlan(type){try{const platform=prompt('平台：douyin 或 xiaohongshu',lastItems[0]?.platform||'douyin')||'douyin';const text=prompt(type==='comment'?'评论内容':'回复内容','');if(!text)return;const body={platform,action_type:type,text,dry_run:false};if(type==='comment')body.item_id=prompt('条目 ID',lastItems[0]?.item_id||'');else body.comment_id=prompt('评论 ID',lastComments[0]?.comment_id||'');const r=await postJson('/api/platform-actions/plan',body);alert(JSON.stringify(r));await refresh()}catch(e){alert(e.message)}}
+    async function platformExecute(){try{const key=prompt('粘贴待确认的 action_key');if(!key)return;const r=await postJson('/api/platform-actions/execute',{action_key:key,confirm:true});alert(JSON.stringify(r));await refresh()}catch(e){alert(e.message)}}
     async function refresh(){
       document.getElementById('status').textContent=JSON.stringify(await get('/api/status'),null,2);
       document.getElementById('replies').textContent=JSON.stringify(await get('/api/replies'),null,2);
