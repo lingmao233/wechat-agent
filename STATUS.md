@@ -1,7 +1,7 @@
 # 微信 AI Agent 当前状态
 
-更新时间：2026-10-26  
-结论：**离线核心和本地桌面控制台已完成，真实微信端到端联调尚未通过。** 当前没有发送微信消息、@、评论或私信。
+更新时间：2026-10-27
+结论：**离线核心、本地桌面控制台和可选的平台浏览器连接器已完成，真实微信端到端联调尚未通过。** 抖音/小红书连接器支持人工登录、有限滚动读取和人工确认动作队列；当前没有替用户发送微信消息或平台评论。
 
 ## 已完成的代码
 
@@ -14,13 +14,13 @@
 | [`src/wechat_agent/llm.py`](src/wechat_agent/llm.py) | DeepSeek/OpenAI 兼容调用；没有 Key 时使用离线 stub |
 | [`src/wechat_agent/config.py`](src/wechat_agent/config.py) | `.env` 配置、30 天原文留存和 14/90/365 天半衰期参数 |
 | [`src/wechat_agent/desktop.py`](src/wechat_agent/desktop.py) | 本地 Web 桌面控制台：启动/停止、STOP、回复台账和动作审计 |
-| [`src/wechat_agent/platforms/`](src/wechat_agent/platforms/) | 抖音/小红书统一浏览、评论、回复接口；fixture dry-run 与平台动作幂等台账 |
+| [`src/wechat_agent/platforms/`](src/wechat_agent/platforms/) | 抖音/小红书统一浏览、评论、回复接口；fixture dry-run、Playwright 可见浏览器、平台动作幂等台账和挑战即停 |
 | [`migrations/001_pgvector.sql`](migrations/001_pgvector.sql) | PostgreSQL/pgvector 迁移草案 |
 | [`tests/`](tests/) | 记忆隔离、时间召回、去重、策略和无 Key stub 测试 |
 
 ## 已验证结果
 
-- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**19 passed**。
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q`：**23 passed**。
 - `python -m compileall -q src`：通过。
 - `python -m wechat_agent init-db`：输出 `database schema initialized`。
 - 本机已安装并可导入 `uiautomation==2.0.18`、`pyperclip`、`pytest`、`python-dotenv`。
@@ -62,6 +62,7 @@
 - 通过 `reply_records` 持久化事件幂等、已回答问题和失败重试状态。
 - 通过 `python -m wechat_agent desktop` 使用本地控制台查看状态、台账和审计。
 - 通过平台 dry-run 适配器验证浏览、评论/回复计划和幂等键；尚未连接真实平台浏览器会话。
+- 设置 `PLATFORM_BROWSER_ENABLED=true` 后，可在桌面控制台打开独立的抖音/小红书持久化浏览器，滚动读取公开内容和带稳定 DOM ID 的评论；评论/回复需 `PLATFORM_WRITE_ENABLED=true` 且二次确认。
 - 审计允许和拒绝的发送动作。
 - 用 STOP 文件停止监听。
 
@@ -71,8 +72,8 @@
 - 不能确认 4.1.15.56 上消息行选择器、输入框和发送按钮长期稳定。
 - 不能确认真实客户端中自动 @ 选择和发送后的成功回执。
 - 不能宣称已经接入 PostgreSQL 向量检索。
-- 不能宣称已经接入抖音、B 站、小红书采集或评论。
-- 不能宣称抖音或小红书真实评论/回复已经发送；当前只有离线 dry-run 计划。
+- 不能宣称已经完成抖音或小红书真实账号登录后的页面选择器验收。
+- 不能宣称抖音或小红书真实评论/回复已经发送；当前需要专用账号逐平台扫码和人工确认。当前网络对小红书返回了“IP 存在风险”，连接器会停止，不会绕过。
 
 ## 下一步最小联调顺序
 
