@@ -53,6 +53,12 @@ class BrowserProfile:
     editor_selectors: tuple[str, ...]
     login_markers: tuple[str, ...]
     challenge_markers: tuple[str, ...]
+    authenticated_selectors: tuple[str, ...] = (
+        "[data-e2e*='user']",
+        "[data-testid*='user']",
+        "a[href*='/profile']",
+    )
+    authenticated_markers: tuple[str, ...] = ("退出登录", "个人主页", "我的主页")
     reply_markers: tuple[str, ...] = ("回复", "Reply")
     send_markers: tuple[str, ...] = ("发送", "评论", "发布", "Send", "Post")
 
@@ -79,7 +85,7 @@ PROFILES: dict[PlatformName, BrowserProfile] = {
             "input[placeholder*='回复']",
         ),
         login_markers=("登录", "扫码登录", "Log in", "Sign in"),
-        challenge_markers=("验证码", "安全验证", "行为异常", "访问受限", "captcha", "verify"),
+        challenge_markers=("验证码", "安全验证", "行为异常", "访问受限", "IP存在风险", "切换可靠网络", "captcha", "verify"),
     ),
     "xiaohongshu": BrowserProfile(
         platform="xiaohongshu",
@@ -102,7 +108,7 @@ PROFILES: dict[PlatformName, BrowserProfile] = {
             "input[placeholder*='回复']",
         ),
         login_markers=("登录", "扫码登录", "Log in", "Sign in"),
-        challenge_markers=("验证码", "安全验证", "行为异常", "访问受限", "captcha", "verify"),
+        challenge_markers=("验证码", "安全验证", "行为异常", "访问受限", "IP存在风险", "切换可靠网络", "captcha", "verify"),
     ),
 }
 
@@ -172,7 +178,7 @@ class BrowserPlatformAdapter:
                 challenge = self._challenge_reason(text)
                 status["challenge"] = challenge
                 logged_in = not self._looks_logged_out(self._page.url, text)
-                status["logged_in"] = logged_in and not challenge
+                status["logged_in"] = logged_in and not challenge and self._authenticated_evidence(text)
                 status["requires_manual_login"] = not status["logged_in"]
             except Exception as exc:  # browser may have been closed externally
                 status["last_error"] = f"{type(exc).__name__}: {exc}"
@@ -302,6 +308,8 @@ class BrowserPlatformAdapter:
                 raise PlatformWriteBlocked("action_target_host_not_allowed")
             self._ensure_ready()
             self._ensure_no_challenge()
+            if not self._authenticated_evidence(self._body_text()):
+                raise PlatformLoginRequired(f"{self.platform}_manual_login_required")
             self._goto(target_url)
             self._ensure_no_challenge()
             action_type = str(action.get("action_type") or "")
@@ -653,6 +661,18 @@ class BrowserPlatformAdapter:
         # login link visible.  Require two markers or a login URL.
         hits = sum(1 for marker in self.profile.login_markers if marker.casefold() in lowered)
         return hits >= 2
+
+    def _authenticated_evidence(self, text: str) -> bool:
+        lowered = text.casefold()
+        if any(marker.casefold() in lowered for marker in self.profile.authenticated_markers):
+            return True
+        for selector in self.profile.authenticated_selectors:
+            try:
+                if self._page.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
 
 def _validate_text(text: str) -> str:
