@@ -57,7 +57,21 @@ XIAOHONGSHU_MENTION_ALLOWLIST=小红书用户ID1
 
 ## 联网问答和平台内容
 
-可在 `.env` 中显式开启联网研究。`WEB_SEARCH_PROVIDER` 支持 `brave`、`tavily` 和自建 `searxng`；搜索结果带标题、URL、摘要，只有实时/搜索类问题才调用。网页正文抓取还需要 `WEB_FETCH_ENABLED=true` 和 `WEB_FETCH_ALLOWED_DOMAINS` 白名单。搜索结果、网页正文和抖音/小红书公开评论只进入当前问题上下文，不写入群友长期画像。
+可在 `.env` 中显式开启联网研究。`WEB_SEARCH_PROVIDER=deepseek-search-api` 时直接复用 DSH 的局域网搜索中转：
+
+```ini
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=deepseek-search-api
+WEB_SEARCH_BASE_URL=http://192.168.20.38:8787/v1/tools
+WEB_SEARCH_API_KEY=lan
+WEB_SEARCH_MAX_RESULTS=5
+WEB_FETCH_ENABLED=true
+WEB_FETCH_ALLOWED_DOMAINS=example.com,docs.example.com
+```
+
+请求会发到 `POST /v1/tools/search`；网页正文继续使用本地 HTTP 和域名白名单，不使用 Exa 或官方 DeepSeek Messages 搜索。也可以选择 `brave`、`tavily` 或自建 `searxng`。搜索结果、网页正文和抖音/小红书公开评论只进入当前问题上下文，不写入群友长期画像。
+
+同一个 agent 还支持可选的第二个生图模型。把 `IMAGE_MODEL_ENABLED=true`、`IMAGE_MODEL_BASE_URL`、`IMAGE_MODEL_API_KEY` 和 `IMAGE_MODEL` 配好后，明确 @AI 的“生成图片/画一张/生图”消息会调用 `POST /v1/images/generations`，文字问题仍走 `LLM_*`。当前微信连接器会把生成 URL 作为文字发出，图片消息发送需要后续补 UI 适配。
 
 当 `PLATFORM_BROWSER_ENABLED=true` 且平台浏览器已人工登录时，群友明确询问“抖音/小红书”内容会读取当前公开条目和公开评论。遇到验证码、安全验证、IP 风险或登录失效会停止，不绕过平台限制。完整变量说明见 [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md)，候选 GitHub 项目核验见 [`docs/OPEN_SOURCE_RESEARCH.md`](docs/OPEN_SOURCE_RESEARCH.md)。
 
@@ -73,7 +87,7 @@ python -m wechat_agent --stop
 
 ## 数据边界
 
-`messages` 保存原始消息 30 天；`memory_facts` 长期保存事实和画像，记录 `observed_at`、`valid_from`、`valid_to`、置信度、确认状态和来源事件；检索按 `account_id + group_id + member_id` 强制过滤。聊天、兴趣、稳定事实分别使用 14、90、365 天半衰期。当前画像是带来源的事实/兴趣记录和简单模式抽取，不是完整的结构化人格模型，也还没有接入 pgvector。
+`messages` 保存原始消息 30 天；`memory_facts` 长期保存事实和画像，记录 `observed_at`、`valid_from`、`valid_to`、置信度、确认状态和来源事件；检索按 `account_id + group_id + member_id` 强制过滤。聊天、兴趣、稳定事实分别使用 14、90、365 天半衰期。默认记忆库使用关键词和时间衰减，不需要向量模型；`embedding_json` 与 pgvector 迁移是后续可选扩展。Mem0、Graphiti、Letta/LangMem 可借鉴其事实抽取和更新策略，但不能绕过本项目的群/成员隔离与审计边界。
 
 平台账号绑定接口预留在 `identity_bindings`，绑定必须由群友明确确认；同一平台身份可以映射到多个群，但记忆和画像不会跨群直接混用。
 

@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 
 from .config import Settings
+from .image import ImageClient
 from .llm import LLMClient
 from .models import MemoryFact, MessageEvent, OutboundAction
 from .policy import ActionPolicy
@@ -36,6 +37,7 @@ class WeChatAgent:
         policy=None,
         platform_service=None,
         web_research=None,
+        image_client=None,
     ):
         self.settings = settings
         self.storage = storage or Storage(settings)
@@ -47,6 +49,7 @@ class WeChatAgent:
             settings,
             platform_service=platform_service,
         )
+        self.image_client = image_client or ImageClient(settings)
         self.stats = AgentStats()
         self._recent_outbound: dict[str, float] = {}
 
@@ -134,38 +137,43 @@ class WeChatAgent:
         )
         reply_text: str | None = None
         try:
-            web_sources = self.web_research.research(event.text)
-            if web_sources:
-                log.info("online research sources=%d for %s", len(web_sources), event.member_name)
-                reply = self.llm.reply(
-                    event.text,
-                    event.member_name,
-                    event.group_name,
-                    memories,
-                    web_sources=web_sources,
-                )
+            if self.image_client.should_generate(event.text):
+                image_reply = self.image_client.generate(self.image_client.prompt(event.text))
+                reply_text = image_reply.text
+                log.info("image route model=%s used_api=%s", image_reply.model, image_reply.used_api)
             else:
-                reply = self.llm.reply(event.text, event.member_name, event.group_name, memories)
-            reply_text = reply.text
+                web_sources = self.web_research.research(event.text)
+                if web_sources:
+                    log.info("online research sources=%d for %s", len(web_sources), event.member_name)
+                    reply = self.llm.reply(
+                        event.text,
+                        event.member_name,
+                        event.group_name,
+                        memories,
+                        web_sources=web_sources,
+                    )
+                else:
+                    reply = self.llm.reply(event.text, event.member_name, event.group_name, memories)
+                reply_text = reply.text
             action = OutboundAction(
                 account_id=event.account_id,
                 group_id=event.group_id,
                 group_name=event.group_name,
-                text=reply.text,
+                text=reply_text or "",
                 action_type="group_reply",
                 target_member_id=event.member_id,
             )
             allowed, auth_reason = self.policy.authorize(action)
             if not allowed:
                 self.storage.finish_processing(claim.event_key, "skipped", auth_reason, reply_text)
-                log.info("reply blocked (%s): %s", auth_reason, reply.text[:80])
+                log.info("reply blocked (%s): %s", auth_reason, (reply_text or "")[:80])
                 self.stats.skipped += 1
                 return False
             # A record becomes ``sent`` only after the UI adapter returns.  A
             # model response or a dry-run audit entry alone is not an answer.
             self.ui.send(action)
             self.policy.mark_sent()
-            self._remember_outbound(reply.text)
+            self._remember_outbound(reply_text or "")
             self.storage.finish_processing(claim.event_key, "sent", "sent", reply_text)
             self.stats.replied += 1
             return True

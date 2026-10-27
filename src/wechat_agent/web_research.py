@@ -56,7 +56,11 @@ class WebResearchClient:
         if self.settings.platform_browser_enabled and self.platform_service:
             sources.extend(self._platform_sources(query))
 
-        if self.settings.web_search_enabled and self._should_search(query):
+        if self.settings.web_fetch_enabled:
+            # Keep an explicitly requested URL ahead of search results so a
+            # direct ``web_fetch`` style question is not truncated away.
+            sources.extend(self._explicit_url_sources(query))
+        if self.settings.web_search_enabled and self._should_search(query) and not self._is_direct_fetch(query):
             sources.extend(self._search(query))
 
         max_results = self.settings.web_search_max_results
@@ -67,7 +71,29 @@ class WebResearchClient:
 
     def _should_search(self, query: str) -> bool:
         """Avoid a network call for ordinary conversational @ messages."""
-        return bool(self._SEARCH_HINTS.search(query) or query.endswith(("?", "？")))
+        return bool(
+            self._SEARCH_HINTS.search(query)
+            or query.endswith(("?", "？"))
+            or re.search(r"https?://\S+", query, flags=re.IGNORECASE)
+        )
+
+    @staticmethod
+    def _is_direct_fetch(query: str) -> bool:
+        return bool(
+            re.search(r"https?://\S+", query, flags=re.IGNORECASE)
+            and re.search(r"抓取|读取(?:网页|链接)?|打开链接|fetch", query, flags=re.IGNORECASE)
+        )
+
+    @staticmethod
+    def _explicit_url_sources(query: str) -> list[WebSource]:
+        """Turn an explicitly supplied URL into a local-fetch candidate.
+
+        This is the WeChat equivalent of DSH's separate ``web_fetch`` tool:
+        the URL is still checked by ``_allowed_host`` before any HTTP request,
+        and it never goes through the DeepSeek search relay.
+        """
+        urls = re.findall(r"https?://[^\s<>\"'）)】]+", query, flags=re.IGNORECASE)
+        return [WebSource(title=url, url=url) for url in urls[:10]]
 
     def _search(self, query: str) -> list[WebSource]:
         provider = self.settings.web_search_provider
@@ -78,6 +104,8 @@ class WebResearchClient:
                 return self._search_tavily(query)
             if provider == "searxng":
                 return self._search_searxng(query)
+            if provider == "deepseek-search-api":
+                return self._search_deepseek_api(query)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             # A search outage must not prevent a normal AI answer.
             return []
@@ -152,6 +180,59 @@ class WebResearchClient:
             for row in data.get("results", [])
             if row.get("url")
         ]
+
+    def _search_deepseek_api(self, query: str) -> list[WebSource]:
+        """Call the LAN DeepSeek search relay used by the DSH profile.
+
+        The relay is a search-only endpoint.  Its configured base is the same
+        value used in DSH (``.../v1/tools``), and the concrete route is
+        ``POST /search``.  Page retrieval deliberately stays in
+        :meth:`_fetch_source`, so ``WEB_FETCH_*`` continues to enforce the
+        local HTTP allowlist and no URL is sent back through the relay.
+        """
+        base = self.settings.web_search_base_url.strip()
+        api_key = self.settings.web_search_api_key.strip()
+        if not base or not api_key:
+            return []
+        url = base.rstrip("/")
+        if not url.casefold().endswith("/search"):
+            url += "/search"
+        payload = {
+            "query": query,
+            "max_results": self.settings.web_search_max_results,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        }
+        with httpx.Client(timeout=self.settings.web_timeout_seconds, follow_redirects=False) as client:
+            response = client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+        rows = data.get("results", []) if isinstance(data, dict) else []
+        if not isinstance(rows, list):
+            return []
+        sources: list[WebSource] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("url"):
+                continue
+            snippet = row.get("snippet") or row.get("summary") or row.get("content") or ""
+            metadata = {
+                "provider": "deepseek-search-api",
+                "site_name": row.get("site_name"),
+                "authority": row.get("authority"),
+                "rerank_score": row.get("rerank_score"),
+                "date": row.get("date"),
+            }
+            sources.append(
+                WebSource(
+                    title=str(row.get("title") or row.get("url") or "").strip(),
+                    url=str(row.get("url") or "").strip(),
+                    snippet=str(snippet).strip(),
+                    metadata={key: value for key, value in metadata.items() if value is not None},
+                )
+            )
+        return sources
 
     def _platform_sources(self, query: str) -> list[WebSource]:
         requested: list[str] = []

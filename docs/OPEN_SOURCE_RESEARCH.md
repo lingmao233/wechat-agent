@@ -19,8 +19,11 @@
 | [cv-cat/DouYin_Spider](https://github.com/cv-cat/DouYin_Spider) | 当前静态读取未找到可确认的根目录 LICENSE | README 自述包含 Cookie/私有签名、作品/评论/私信和写入接口 | 仅作能力对照，禁止直接复制或作为生产依赖；私有接口、Cookie 和签名会随平台变化 |
 | [63can/xiaohongshu-spider](https://github.com/63can/xiaohongshu-spider) | 当前静态读取未找到可确认的根目录 LICENSE；README 依赖 Fiddler、ChromeDriver 和小红书小程序抓包 | 可抓取文章/视频、评论/回复，但方案较旧，依赖抓包文件 | 仅作历史能力参考，不接入代码 |
 | [Big-Buffer/XiaohongshuSpider](https://github.com/Big-Buffer/XiaohongshuSpider) | 当前静态读取未找到可确认的根目录 LICENSE | README 依赖 Appium、mitmproxy 和 Android 模拟器，重点是抓包图片/文章数据 | 仅作历史能力参考，不接入代码 |
+| [mem0ai/mem0](https://github.com/mem0ai/mem0) | MIT；事实抽取、更新和多种向量存储适配较成熟 | 重点是通用用户/应用记忆，不知道本项目的微信账号、群、成员隔离和发送审计 | 借鉴事实更新与冲突处理思路；不直接替换现有存储，避免把跨群记忆混在一起 |
+| [getzep/graphiti](https://github.com/getzep/graphiti) | Apache-2.0；时间知识图谱和事实失效建模较完整 | 需要图数据库和 embedding/LLM 依赖，部署复杂度明显高于当前测试群原型 | 作为后续长期画像/关系记忆的候选，不作为当前运行时依赖 |
+| [letta-ai/letta](https://github.com/letta-ai/letta) | Apache-2.0；带可持久化上下文和工具的 agent 运行时 | 整体运行时较重，边界与本项目的微信 UI 连接器不同 | 只参考记忆分层和显式更新机制，不复制 agent 主循环 |
 
-当前核实到的 `dsh-world` 是 `chenkezhen480/dsh-world`。现有实现借鉴的是身份隔离、任务队列、审计和桌面控制台的结构思想，记忆库则采用更严格的 `account_id + group_id + member_id` 命名空间和可审计事实记录。
+当前核实到的 `dsh-world` 是 `chenkezhen480/dsh-world`。现有实现借鉴的是身份隔离、任务队列、审计和桌面控制台的结构思想，记忆库则采用更严格的 `account_id + group_id + member_id` 命名空间和可审计事实记录。当前默认不需要向量模型：小规模测试群用关键词重合、置信度和时间衰减即可；要做中文语义相似召回时，再增加 embedding 模型和 PostgreSQL/pgvector，并保留 lexical fallback。
 
 ## 为什么没有直接抄爬虫
 

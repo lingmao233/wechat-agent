@@ -150,13 +150,17 @@ AI 别名由 `WECHAT_AI_ALIASES` 配置。消息包含别名时，必须进入�
 
 ### FR-11 联网问答
 
-搜索默认关闭。开启后只对实时、搜索、来源、价格、新闻以及明确平台查询等意图调用 provider。当前支持 Brave、Tavily 和自建 SearXNG；provider 不可用时不阻断普通回答。结果必须包含标题、URL 和摘要，模型提示词要求对外部事实保留来源链接。
+搜索默认关闭。开启后只对实时、搜索、来源、价格、新闻以及明确平台查询等意图调用 provider。当前支持 Brave、Tavily、自建 SearXNG 和 DSH 同款 `deepseek-search-api` 中转；provider 不可用时不阻断普通回答。DeepSeek 中转使用 `POST /v1/tools/search`，不使用 Exa 或官方 DeepSeek Messages 搜索。结果必须包含标题、URL 和摘要，模型提示词要求对外部事实保留来源链接。
 
 网页正文抓取必须同时打开 `WEB_FETCH_ENABLED` 并匹配 `WEB_FETCH_ALLOWED_DOMAINS`。禁止把任意 URL 当作可抓取目标，禁止访问未授权内网地址。抓取的正文只保留在当前请求上下文，不能作为 `memory_facts` 写入。
 
 ### FR-12 公开平台内容参考
 
 平台查询只使用当前已登录的可见浏览器适配器读取公开页面。每条条目必须带平台、条目 ID、URL、作者 ID（如果页面提供）和当前页面文本；评论必须带评论 ID、作者 ID（如果页面提供）和父评论 ID。没有稳定 DOM ID 的评论跳过，不按昵称猜测。平台内容与微信群友画像保持不同命名空间。
+
+### FR-13 多模型和生图
+
+文字问答与生图模型必须使用独立配置和独立路由。同一 agent 收到明确 @AI 的生图意图时调用 OpenAI-compatible `POST /v1/images/generations`，普通问题继续调用 `/v1/chat/completions`。生图结果当前以 URL 或受控本地文件路径作为文字回复；微信图片消息发送需要后续 UI 适配，不得把图片 URL 当成已上传的微信图片。
 
 ## 6. 数据模型
 
@@ -177,7 +181,8 @@ SQLite 用于本机原型；PostgreSQL+pgvector 迁移文件已准备，但真�
 - `agent.py`：消息编排、事实抽取、召回、模型调用和动作执行。
 - `storage.py`：SQLAlchemy 数据访问、留存清理、绑定和审计。
 - `policy.py`：群白名单、成员白名单、`@AI` 规则、发送开关、速率熔断和 STOP。
-- `llm.py`：DeepSeek/OpenAI 兼容客户端和无密钥 stub。
+- `llm.py`：DeepSeek/OpenAI 兼容文字客户端和无密钥 stub。
+- `image.py`：可选 OpenAI-compatible 生图客户端；由 `agent.py` 按请求意图路由。
 - `desktop.py`：本机 Web 桌面控制台，管理监听、STOP、台账和审计。
 - `platforms/`：抖音/小红书统一浏览、评论、回复接口和 dry-run 动作计划。
 - `web_research.py`：搜索 provider、域名白名单正文抓取，以及平台公开内容临时上下文。

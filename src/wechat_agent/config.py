@@ -66,7 +66,13 @@ class Settings(BaseSettings):
     # deployment can use a search provider without allowing arbitrary page
     # retrieval.  Fetching is restricted to an explicit domain allowlist.
     web_search_enabled: bool = False
-    web_search_provider: Literal["none", "brave", "tavily", "searxng"] = "none"
+    web_search_provider: Literal[
+        "none",
+        "brave",
+        "tavily",
+        "searxng",
+        "deepseek-search-api",
+    ] = "none"
     web_search_api_key: str = ""
     web_search_base_url: str = ""
     web_search_max_results: int = Field(default=5, ge=1, le=10)
@@ -85,7 +91,18 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
-    llm_max_output_tokens: int = Field(default=500, ge=32, le=4096)
+    llm_max_output_tokens: int = Field(default=500, ge=32, le=16_384)
+
+    # Optional second model endpoint.  It is kept separate from the text
+    # model so a single agent can route image requests to an OpenAI-compatible
+    # ``/v1/images/generations`` service without changing chat credentials.
+    image_model_enabled: bool = False
+    image_model_base_url: str = ""
+    image_model_api_key: str = ""
+    image_model: str = ""
+    image_model_size: str = "1024x1024"
+    image_model_response_format: Literal["url", "b64_json"] = "url"
+    image_model_timeout_seconds: float = Field(default=120.0, gt=0, le=600.0)
     binding_code_ttl_minutes: int = Field(default=10, ge=1, le=60)
 
     @field_validator(
