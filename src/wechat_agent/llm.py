@@ -7,6 +7,7 @@ import httpx
 
 from .config import Settings
 from .models import MemoryFact
+from .web_research import WebSource
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class LLMClient:
         member_name: str,
         group_name: str,
         memories: list[MemoryFact],
+        web_sources: list[WebSource] | None = None,
     ) -> LLMReply:
         if not self.settings.llm_api_key:
             return LLMReply(
@@ -41,9 +43,18 @@ class LLMClient:
             "你是测试群中的 AI，必须明确自己是 AI。只使用当前群和当前群友的上下文。"
             "推断字段只能作为假设，不能说成已确认事实。不要泄露其他群的内容。"
         )
+        source_text = ""
+        if web_sources:
+            system += (
+                "如果提供了联网资料，只能把它作为当前问题的参考；不要把网页作者、平台账号或评论"
+                "写入群友画像。回答涉及外部事实时，在相关句子后保留来源链接。"
+            )
+            source_text = "\n\n联网资料（可能不完整，需按来源核对）：\n" + "\n\n".join(
+                f"[{index}] {source.prompt_text}" for index, source in enumerate(web_sources, start=1)
+            )
         user = (
             f"群：{group_name}\n群友：{member_name}\n\n"
-            f"可用记忆：\n{memory_text}\n\n消息：{incoming}"
+            f"可用记忆：\n{memory_text}\n\n消息：{incoming}{source_text}"
         )
         payload = {
             "model": self.settings.llm_model,

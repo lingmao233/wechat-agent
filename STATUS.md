@@ -1,7 +1,7 @@
 # 微信 AI Agent 当前状态
 
 更新时间：2026-10-27
-结论：**离线核心、本地桌面控制台和可选的平台浏览器连接器已完成，真实微信端到端联调尚未通过。** 抖音/小红书连接器支持人工登录、有限滚动读取和人工确认动作队列；当前没有替用户发送微信消息或平台评论。
+结论：**离线核心、本地桌面控制台、受控联网研究和可选的平台浏览器连接器已完成，真实微信端到端联调尚未通过。** 抖音/小红书连接器支持人工登录、有限滚动读取和人工确认动作队列；当前没有替用户发送微信消息或平台评论。
 
 ## 已完成的代码
 
@@ -14,7 +14,8 @@
 | [`src/wechat_agent/llm.py`](src/wechat_agent/llm.py) | DeepSeek/OpenAI 兼容调用；没有 Key 时使用离线 stub |
 | [`src/wechat_agent/config.py`](src/wechat_agent/config.py) | `.env` 配置、30 天原文留存和 14/90/365 天半衰期参数 |
 | [`src/wechat_agent/desktop.py`](src/wechat_agent/desktop.py) | 本地 Web 桌面控制台：启动/停止、STOP、回复台账和动作审计 |
-| [`src/wechat_agent/platforms/`](src/wechat_agent/platforms/) | 抖音/小红书统一浏览、评论、回复接口；fixture dry-run、Playwright 可见浏览器、平台动作幂等台账和挑战即停 |
+| [`src/wechat_agent/platforms/`](src/wechat_agent/platforms/) | 抖音/小红书统一浏览、评论、回复接口；fixture dry-run、Playwright 可见浏览器、平台动作幂等台账、@ 白名单校验和挑战即停 |
+| [`src/wechat_agent/web_research.py`](src/wechat_agent/web_research.py) | Brave/Tavily/SearXNG 搜索、显式域名白名单正文抓取，以及当前已登录平台公开条目/评论的临时上下文 |
 | [`migrations/001_pgvector.sql`](migrations/001_pgvector.sql) | PostgreSQL/pgvector 迁移草案 |
 | [`tests/`](tests/) | 记忆隔离、时间召回、去重、策略和无 Key stub 测试 |
 
@@ -63,6 +64,8 @@
 - 通过 `python -m wechat_agent desktop` 使用本地控制台查看状态、台账和审计。
 - 通过平台 dry-run 适配器验证浏览、评论/回复计划和幂等键；尚未连接真实平台浏览器会话。
 - 设置 `PLATFORM_BROWSER_ENABLED=true` 后，可在桌面控制台打开独立的抖音/小红书持久化浏览器，滚动读取公开内容和带稳定 DOM ID 的评论；评论/回复需 `PLATFORM_WRITE_ENABLED=true` 且二次确认。
+- `DOUYIN_MENTION_ALLOWLIST` 和 `XIAOHONGSHU_MENTION_ALLOWLIST` 只按平台唯一用户 ID 配置；动作请求必须同时提交 `mention_ids`，服务层只按 ID 核对并把已核对的 ID 写入动作元数据。
+- 设置 `WEB_SEARCH_ENABLED=true` 后，明确的实时/搜索类 @AI 问题可以调用 Brave、Tavily 或自建 SearXNG；网页正文还需要域名白名单。搜索结果和平台公开内容只进入当前回答上下文，不写入 `memory_facts`。
 - 审计允许和拒绝的发送动作。
 - 用 STOP 文件停止监听。
 
@@ -72,8 +75,11 @@
 - 不能确认 4.1.15.56 上消息行选择器、输入框和发送按钮长期稳定。
 - 不能确认真实客户端中自动 @ 选择和发送后的成功回执。
 - 不能宣称已经接入 PostgreSQL 向量检索。
+- 不能宣称已经建立完整结构化人物画像；当前是按账号/群/成员隔离的事实、兴趣和聊天记录，带来源、置信度、状态和时间衰减。
 - 不能宣称已经完成抖音或小红书真实账号登录后的页面选择器验收。
 - 不能宣称抖音或小红书真实评论/回复已经发送；当前需要专用账号逐平台扫码和人工确认。当前网络对小红书返回了“IP 存在风险”，连接器会停止，不会绕过。
+- 当前平台连接器只完成唯一 ID 的白名单校验和记录；抖音/小红书原生 @ 候选选择器仍需逐平台真实页面验收，带 `mention_ids` 的真实写入会安全阻断，不能把普通文本 `@昵称` 当作已确认的平台提及。
+- 联网搜索和公开平台读取仍是可选、受限的当前请求上下文能力；没有 API key、浏览器登录态或域名白名单时会回退到普通 AI 回复。
 
 ## 下一步最小联调顺序
 

@@ -44,6 +44,23 @@ python -m wechat_agent desktop --open-browser
 `PLATFORM_BROWSER_ENABLED=true`，桌面控制台会分别打开两个持久化浏览器目录；评论和回复仍默认只入队，只有在
 `PLATFORM_WRITE_ENABLED=true` 并在控制台二次确认后才会尝试发送。
 
+平台评论或回复中的 `@` 目标必须在对应白名单中。白名单只保存平台唯一用户 ID，昵称不能作为授权主键：
+
+```ini
+DOUYIN_ACCOUNT_ID=douyin-main
+XIAOHONGSHU_ACCOUNT_ID=xhs-main
+DOUYIN_MENTION_ALLOWLIST=抖音用户ID1,抖音用户ID2
+XIAOHONGSHU_MENTION_ALLOWLIST=小红书用户ID1
+```
+
+`ACCOUNT_ID` 只是本地审计命名，不是登录账号、密码或 Cookie；登录态由各自可见浏览器扫码保存。桌面端创建 @ 动作时，文本里的 `@昵称` 必须同时带 `mention_ids`，服务层只核对唯一 ID 是否在对应白名单；没有 ID 的 @ 文本会拒绝入队。平台原生提及候选选择器尚未完成真实页面验收，当前真实写入会安全阻断这类动作。
+
+## 联网问答和平台内容
+
+可在 `.env` 中显式开启联网研究。`WEB_SEARCH_PROVIDER` 支持 `brave`、`tavily` 和自建 `searxng`；搜索结果带标题、URL、摘要，只有实时/搜索类问题才调用。网页正文抓取还需要 `WEB_FETCH_ENABLED=true` 和 `WEB_FETCH_ALLOWED_DOMAINS` 白名单。搜索结果、网页正文和抖音/小红书公开评论只进入当前问题上下文，不写入群友长期画像。
+
+当 `PLATFORM_BROWSER_ENABLED=true` 且平台浏览器已人工登录时，群友明确询问“抖音/小红书”内容会读取当前公开条目和公开评论。遇到验证码、安全验证、IP 风险或登录失效会停止，不绕过平台限制。完整变量说明见 [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md)，候选 GitHub 项目核验见 [`docs/OPEN_SOURCE_RESEARCH.md`](docs/OPEN_SOURCE_RESEARCH.md)。
+
 默认只监听 `127.0.0.1:8765`。需要从其他机器访问时，设置 `DESKTOP_TOKEN`，再通过反向代理暴露；控制台的启动、停止、回复台账和动作审计都使用同一套发送策略。
 
 停止方式：
@@ -56,7 +73,7 @@ python -m wechat_agent --stop
 
 ## 数据边界
 
-`messages` 保存原始消息 30 天；`memory_facts` 长期保存事实和画像，记录 `observed_at`、`valid_from`、`valid_to`、置信度、确认状态和来源事件；检索按 `account_id + group_id + member_id` 强制过滤。聊天、兴趣、稳定事实分别使用 14、90、365 天半衰期。
+`messages` 保存原始消息 30 天；`memory_facts` 长期保存事实和画像，记录 `observed_at`、`valid_from`、`valid_to`、置信度、确认状态和来源事件；检索按 `account_id + group_id + member_id` 强制过滤。聊天、兴趣、稳定事实分别使用 14、90、365 天半衰期。当前画像是带来源的事实/兴趣记录和简单模式抽取，不是完整的结构化人格模型，也还没有接入 pgvector。
 
 平台账号绑定接口预留在 `identity_bindings`，绑定必须由群友明确确认；同一平台身份可以映射到多个群，但记忆和画像不会跨群直接混用。
 

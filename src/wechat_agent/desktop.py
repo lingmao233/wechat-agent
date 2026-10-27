@@ -30,10 +30,9 @@ class DesktopController:
         self,
         settings: Settings,
         *,
-        agent_factory: Callable[[Settings], WeChatAgent] = WeChatAgent,
+        agent_factory: Callable[[Settings], WeChatAgent] | None = None,
     ):
         self.settings = settings
-        self._agent_factory = agent_factory
         self._storage = Storage(settings)
         self._storage.init_schema()
         if settings.platform_browser_enabled:
@@ -71,7 +70,18 @@ class DesktopController:
         self._platforms = PlatformService(
             self._storage,
             adapters,
+            mention_allowlists={
+                "douyin": settings.douyin_mention_allowlist,
+                "xiaohongshu": settings.xiaohongshu_mention_allowlist,
+            },
         )
+        if agent_factory is None:
+            self._agent_factory = lambda current_settings: WeChatAgent(
+                current_settings,
+                platform_service=self._platforms,
+            )
+        else:
+            self._agent_factory = agent_factory
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._agent: WeChatAgent | None = None
@@ -169,13 +179,22 @@ class DesktopController:
         action_type = str(payload.get("action_type") or "")
         text = str(payload.get("text") or "")
         dry_run = bool(payload.get("dry_run", True))
+        mention_ids = _payload_mention_ids(payload.get("mention_ids"))
         if action_type == "comment":
             receipt = self._platforms.plan_comment(
-                platform, str(payload.get("item_id") or ""), text, dry_run=dry_run  # type: ignore[arg-type]
+                platform,
+                str(payload.get("item_id") or ""),
+                text,
+                mention_ids=mention_ids,
+                dry_run=dry_run,  # type: ignore[arg-type]
             )
         elif action_type == "reply":
             receipt = self._platforms.plan_reply(
-                platform, str(payload.get("comment_id") or ""), text, dry_run=dry_run  # type: ignore[arg-type]
+                platform,
+                str(payload.get("comment_id") or ""),
+                text,
+                mention_ids=mention_ids,
+                dry_run=dry_run,  # type: ignore[arg-type]
             )
         else:
             raise ValueError("unsupported_platform_action_type")
@@ -333,6 +352,17 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
+def _payload_mention_ids(value: object) -> list[str]:
+    """Accept JSON arrays or a comma-separated operator input, never names."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(part).strip() for part in value if str(part).strip()]
+    raise ValueError("mention_ids_must_be_array_or_csv")
+
+
 def create_server(settings: Settings, controller: DesktopController | None = None) -> DesktopServer:
     host = settings.desktop_host.strip() or "127.0.0.1"
     if host not in {"127.0.0.1", "localhost", "::1"} and not settings.desktop_token.strip():
@@ -396,7 +426,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function platformOpen(platform){try{await postJson('/api/platforms/open',{platform});await refresh()}catch(e){alert(e.message)}}
     async function platformBrowse(platform){try{const query=prompt('关键词（留空读取推荐流）','')??'';lastItems=await postJson('/api/platforms/browse',{platform,query,limit:20});document.getElementById('platformItems').textContent=JSON.stringify(lastItems,null,2);await refresh()}catch(e){alert(e.message)}}
     async function platformComments(){try{if(!lastItems.length)throw new Error('先读取内容');const platform=prompt('平台：douyin 或 xiaohongshu',lastItems[0].platform)||lastItems[0].platform;const itemId=prompt('条目 ID',lastItems[0].item_id);lastComments=await postJson('/api/platform-comments',{platform,item_id:itemId,limit:50});document.getElementById('platformComments').textContent=JSON.stringify(lastComments,null,2)}catch(e){alert(e.message)}}
-    async function platformPlan(type){try{const platform=prompt('平台：douyin 或 xiaohongshu',lastItems[0]?.platform||'douyin')||'douyin';const text=prompt(type==='comment'?'评论内容':'回复内容','');if(!text)return;const body={platform,action_type:type,text,dry_run:false};if(type==='comment')body.item_id=prompt('条目 ID',lastItems[0]?.item_id||'');else body.comment_id=prompt('评论 ID',lastComments[0]?.comment_id||'');const r=await postJson('/api/platform-actions/plan',body);alert(JSON.stringify(r));await refresh()}catch(e){alert(e.message)}}
+    async function platformPlan(type){try{const platform=prompt('平台：douyin 或 xiaohongshu',lastItems[0]?.platform||'douyin')||'douyin';const text=prompt(type==='comment'?'评论内容（如需提及，文本中写 @昵称）':'回复内容（如需提及，文本中写 @昵称）','');if(!text)return;const ids=prompt('要提及的唯一用户 ID（逗号分隔；留空表示不提及）','')??'';const body={platform,action_type:type,text,mention_ids:ids.split(',').map(value=>value.trim()).filter(Boolean),dry_run:false};if(type==='comment')body.item_id=prompt('条目 ID',lastItems[0]?.item_id||'');else body.comment_id=prompt('评论 ID',lastComments[0]?.comment_id||'');const r=await postJson('/api/platform-actions/plan',body);alert(JSON.stringify(r));await refresh()}catch(e){alert(e.message)}}
     async function platformExecute(){try{const key=prompt('粘贴待确认的 action_key');if(!key)return;const r=await postJson('/api/platform-actions/execute',{action_key:key,confirm:true});alert(JSON.stringify(r));await refresh()}catch(e){alert(e.message)}}
     async function refresh(){
       document.getElementById('status').textContent=JSON.stringify(await get('/api/status'),null,2);

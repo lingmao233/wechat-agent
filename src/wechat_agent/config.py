@@ -52,11 +52,28 @@ class Settings(BaseSettings):
     platform_browser_headless: bool = False
     douyin_account_id: str = "unbound"
     xiaohongshu_account_id: str = "unbound"
+    # Entries are stable platform user IDs only.  Display names are not unique
+    # and are never used as an authorization key.
+    douyin_mention_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    xiaohongshu_mention_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
     platform_browser_scroll_steps: int = Field(default=5, ge=1, le=20)
     platform_browser_page_timeout_ms: int = Field(default=20_000, ge=5_000, le=120_000)
     platform_write_enabled: bool = False
     platform_action_delay_seconds: float = Field(default=30.0, ge=0, le=86_400)
     platform_max_actions_per_hour: int = Field(default=5, ge=1, le=100)
+
+    # Optional online research.  Search and fetch are separate switches so a
+    # deployment can use a search provider without allowing arbitrary page
+    # retrieval.  Fetching is restricted to an explicit domain allowlist.
+    web_search_enabled: bool = False
+    web_search_provider: Literal["none", "brave", "tavily", "searxng"] = "none"
+    web_search_api_key: str = ""
+    web_search_base_url: str = ""
+    web_search_max_results: int = Field(default=5, ge=1, le=10)
+    web_fetch_enabled: bool = False
+    web_fetch_allowed_domains: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    web_fetch_max_chars: int = Field(default=6000, ge=1000, le=20_000)
+    web_timeout_seconds: float = Field(default=15.0, gt=0, le=60.0)
 
     database_url: str = "sqlite:///state/memory.db"
     raw_retention_days: int = Field(default=30, ge=1)
@@ -71,7 +88,14 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = Field(default=500, ge=32, le=4096)
     binding_code_ttl_minutes: int = Field(default=10, ge=1, le=60)
 
-    @field_validator("wechat_ai_aliases", "wechat_allowed_members", mode="before")
+    @field_validator(
+        "wechat_ai_aliases",
+        "wechat_allowed_members",
+        "douyin_mention_allowlist",
+        "xiaohongshu_mention_allowlist",
+        "web_fetch_allowed_domains",
+        mode="before",
+    )
     @classmethod
     def split_csv(cls, value: object) -> object:
         if isinstance(value, str):

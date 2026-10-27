@@ -10,6 +10,7 @@ from .llm import LLMClient
 from .models import MemoryFact, MessageEvent, OutboundAction
 from .policy import ActionPolicy
 from .storage import Storage
+from .web_research import WebResearchClient
 from .weixin_ui import WeixinUiAdapter
 
 log = logging.getLogger(__name__)
@@ -25,13 +26,27 @@ class AgentStats:
 
 
 class WeChatAgent:
-    def __init__(self, settings: Settings, *, ui=None, llm=None, storage=None, policy=None):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        ui=None,
+        llm=None,
+        storage=None,
+        policy=None,
+        platform_service=None,
+        web_research=None,
+    ):
         self.settings = settings
         self.storage = storage or Storage(settings)
         self.storage.init_schema()
         self.ui = ui or WeixinUiAdapter(settings)
         self.llm = llm or LLMClient(settings)
         self.policy = policy or ActionPolicy(settings, self.storage)
+        self.web_research = web_research or WebResearchClient(
+            settings,
+            platform_service=platform_service,
+        )
         self.stats = AgentStats()
         self._recent_outbound: dict[str, float] = {}
 
@@ -119,7 +134,18 @@ class WeChatAgent:
         )
         reply_text: str | None = None
         try:
-            reply = self.llm.reply(event.text, event.member_name, event.group_name, memories)
+            web_sources = self.web_research.research(event.text)
+            if web_sources:
+                log.info("online research sources=%d for %s", len(web_sources), event.member_name)
+                reply = self.llm.reply(
+                    event.text,
+                    event.member_name,
+                    event.group_name,
+                    memories,
+                    web_sources=web_sources,
+                )
+            else:
+                reply = self.llm.reply(event.text, event.member_name, event.group_name, memories)
             reply_text = reply.text
             action = OutboundAction(
                 account_id=event.account_id,

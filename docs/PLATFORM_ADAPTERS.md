@@ -16,6 +16,20 @@
 
 评论和回复默认 `dry_run=true`，先进入动作台账并要求人工确认。真正执行时必须经过账号绑定、目标白名单、频率限制、幂等键、异常熔断和证据记录。评论 ID 或目标 URL 必须来自当前页面读取结果，不能只按昵称猜测。
 
+### @ 目标白名单
+
+抖音和小红书分别使用 `DOUYIN_MENTION_ALLOWLIST` 与
+`XIAOHONGSHU_MENTION_ALLOWLIST`。每个条目只写唯一的平台用户 ID，多个条目用逗号分隔。例如：
+
+```ini
+DOUYIN_MENTION_ALLOWLIST=uid_123,uid_456
+XIAOHONGSHU_MENTION_ALLOWLIST=xhs_789
+```
+
+评论或回复文本出现 `@张三` 时，调用方还必须提交从当前页面选择出的 `mention_ids=["uid_123"]`；动作规划器只按唯一 ID 核对白名单。昵称不参与授权，也不能单独放行动作。没有 ID、白名单为空或 ID 不在白名单时，动作不会进入队列。`ACCOUNT_ID` 只是发信账号的审计命名，平台登录仍通过可见浏览器人工扫码完成。
+
+服务层会把通过核对的 ID 写入 `mention_target_ids` 和 `mention_allowlist_checked`。真实浏览器执行目前还缺少抖音/小红书原生提及候选选择器，因此带提及 ID 的动作会在执行阶段安全阻断，而不会发送普通文本冒充原生 @。
+
 ## 桌面端操作
 
 复制 `.env.example` 到 `.env` 后打开：

@@ -314,6 +314,10 @@ class BrowserPlatformAdapter:
             self._ensure_no_challenge()
             action_type = str(action.get("action_type") or "")
             text = _validate_text(str(action.get("text") or ""))
+            metadata = action.get("metadata")
+            mention_ids = metadata.get("mention_target_ids", []) if isinstance(metadata, Mapping) else []
+            if mention_ids:
+                raise PlatformWriteBlocked("native_mention_selector_unavailable")
             if action_type == "reply":
                 self._open_reply_editor(str(action.get("parent_comment_id") or action.get("target_id") or ""))
             elif action_type != "comment":
