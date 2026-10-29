@@ -2,7 +2,7 @@
 
 在 Windows 上接管一个**专用测试微信号**，在指定微信群里读消息、学着这群人怎么说话，再按固定人设接话。消息从微信本地数据库读，发送用屏幕坐标 + OCR 模拟真人操作，长期记忆存放在 OpenViking。
 
-定位是个人/小群自用的原型，不是多租户产品。真实群里的端到端联调尚未完成验收，边界见[已知限制](#已知限制)。
+定位是个人/小群自用的原型，不是多租户产品。除了文字聊天，它也能看懂群友发的图片、按需求生图，并把生成的图片直接发到群里。
 
 ---
 
@@ -14,6 +14,7 @@
 | 系统 | Windows 10/11，需要可交互的桌面会话（远程服务器无桌面时会失败） |
 | 收消息 | 读微信本地 SQLCipher 消息库（`wechatauto-replica` 的 `wechatauto.db.Listener`），按群 wxid 监听，不要求微信停在哪个聊天页面 |
 | 发消息 | 「屏幕坐标 + 本地 OCR」模拟操作（`wechatauto.guia.WeChatGUI`）：定位输入框 → 粘贴 → 回读比对 → 回车；失败回退 UIAutomation，并用本地数据库回读确认 |
+| 图片 | 双向都支持：群友发的图片从本地附件解密后交给视觉模型理解；被要求「生图/画一张/出图」时调用生图模型，生成的图片保存到本地后作为**原生图片消息**发出，既不是链接也不是文件路径 |
 | 启动前置 | 先开 **Windows 讲述人（Narrator）** 再重启微信：4.x 只在无障碍模式打开时暴露 UIAutomation 控件树，窗口自检、回退读取和部分发送路径都依赖它 |
 | 记忆 | **OpenViking** 分级记忆（账号 → 群 → 成员 → 任务）；本地 SQL 负责审计、离线回退和混合召回 |
 | 模型 | 任何 OpenAI 兼容接口（默认 DeepSeek）；Embedding、生图、视觉理解可以分别接不同服务 |
@@ -25,6 +26,7 @@
 - **发**：优先走坐标 + OCR 路径——用 Windows 自带 OCR（`winsdk`）识别界面元素，`SendInput` 模拟点击和键入，回车前回读输入框确认内容没落空；这条路径不可用时回退 UIAutomation，并以数据库是否出现这条消息作为发送成功的最终判据。
 - **记**：消息原文 30 天滚动保留，事实、偏好和画像长期保存。配置了 OpenViking 时写入分级记忆目录并按作用域召回；不可达时自动回退到本地 SQL + 词法召回，不阻塞消息处理。
 - **说**：命中触发规则后组装提示词（静态人设 + 群风格画像 + 成员画像 + 相关记忆 + 最近上下文），调用模型生成回复，再过一道人设检查（拦截自称 AI、口癖、过激脏话）。
+- **画**：明确要求「生图 / 画一张 / 出图」时不走聊天模型，改调独立的生图模型，图片落到 `state/generated/` 后作为原生图片附件发出；不会把本地路径、链接或 base64 当文字发到群里。识别/描述/转发图片的请求会被排除，不会误触发生图。
 
 ## 运行环境
 
@@ -83,6 +85,12 @@ OPENVIKING_URL=
 OPENVIKING_API_KEY=
 EMBED_BASE=https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal
 EMBED_KEY=
+
+# 可选：生图（OpenAI 兼容 /images/generations）；不开则只聊天不画图
+IMAGE_MODEL_ENABLED=false
+IMAGE_MODEL_BASE_URL=
+IMAGE_MODEL_API_KEY=
+IMAGE_MODEL=
 ```
 
 ### 4. 初始化并自检
@@ -132,6 +140,8 @@ python -m wechat_agent desktop --open-browser
 - 消息以机器人名称开头
 - 命中 `WECHAT_KEYWORDS`
 
+触发之后还能再分两条路：普通问题走聊天模型；明确要图（生图、画一张、出图等）走生图模型，直接把图片发回群里。生图需要先配好 `IMAGE_MODEL_*`，没配时会回一句失败原因而不是静默跳过。
+
 安全默认值：
 
 - `WECHAT_ALLOW_SEND=false`：不改这个开关，程序只读不写
@@ -158,7 +168,7 @@ python -m wechat_agent desktop --open-browser
 默认全关，按需在 `.env` 打开：
 
 - **联网搜索 / 网页读取**：`WEB_SEARCH_ENABLED=true`，支持 DeepSeek relay、Brave、Tavily、SearXNG；搜索结果只进当前回答上下文，不写入长期记忆。
-- **生图**：`IMAGE_MODEL_ENABLED=true`，返回的图片存到 `state/generated/` 后作为原生图片消息发出；另可上传 OSS 换 URL。
+- **生图发图**：`IMAGE_MODEL_ENABLED=true`，再把 `IMAGE_MODEL_BASE_URL` / `IMAGE_MODEL_API_KEY` / `IMAGE_MODEL` 指向任意 OpenAI 兼容生图接口（`POST /images/generations`）。生成结果存到 `IMAGE_OUTPUT_DIR`（默认 `state/generated/`），作为原生图片消息发出；`IMAGE_UPLOAD_ENABLED=true` 且配好 OSS 时会额外生成公开或签名 URL，上传失败只记日志，不影响发图。
 - **抖音 / 小红书**：`PLATFORM_BROWSER_ENABLED=true` 打开独立持久化浏览器读取公开内容；写入还需 `PLATFORM_WRITE_ENABLED=true` 和二次确认，@ 目标只认平台唯一 ID。见 [`docs/PLATFORM_ADAPTERS.md`](docs/PLATFORM_ADAPTERS.md)。
 - **训练语料导出**：`export-training-data` 从本地库导出 `style_corpus.jsonl`（群成员原话）和 `behavior_pairs.jsonl`（上下文 + 真实回复 + 行为标签）到被忽略的 `data/training/`；可以设 `TRAINING_EXPORT_ENABLED=true` 每晚自动导出。**只导数据，不训练权重**。
 
