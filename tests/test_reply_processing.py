@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 from wechat_agent.agent import WeChatAgent
 from wechat_agent.config import Settings
@@ -25,6 +26,18 @@ class FakeLlm:
         return LLMReply(text=f"已回答：{incoming}", model="test", used_api=False)
 
 
+class ProactiveLlm(FakeLlm):
+    def __init__(self, reply_text="本鱼在"):
+        super().__init__()
+        self.reply_text = reply_text
+        self.kwargs = []
+
+    def reply(self, incoming, member_name, group_name, memories, **kwargs):
+        self.calls.append((incoming, member_name, group_name, memories))
+        self.kwargs.append(kwargs)
+        return LLMReply(text=self.reply_text, model="test", used_api=False)
+
+
 def make_event(text, *, external_id, observed_at=None, is_self=False):
     return MessageEvent(
         account_id="a",
@@ -45,6 +58,7 @@ def make_agent(tmp_path, *, allow_send=True):
         wechat_group_name="测试群",
         wechat_ai_aliases=["AI"],
         wechat_allow_send=allow_send,
+        wechat_proactive_reply=False,
     )
     ui = FakeUi()
     llm = FakeLlm()
@@ -140,6 +154,68 @@ def test_send_block_is_not_recorded_as_answered(tmp_path):
     assert len(allowed_ui.sent) == 1
 
 
+def test_proactive_reply_joins_without_mention_and_can_decline(tmp_path):
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'memory.db'}",
+        wechat_group_name="测试群",
+        wechat_ai_aliases=["AI"],
+        wechat_allow_send=True,
+        wechat_proactive_reply=True,
+        wechat_proactive_probability=1.0,
+        wechat_proactive_min_interval_seconds=0,
+        wechat_proactive_max_per_hour=0,
+        wechat_stop_file=tmp_path / "STOP",
+        group_style_enabled=False,
+        embedding_enabled=False,
+        openviking_enabled=False,
+    )
+    ui = FakeUi()
+    llm = ProactiveLlm()
+    agent = WeChatAgent(settings, ui=ui, llm=llm)
+
+    assert agent.handle_event(make_event("今天好累啊", external_id="proactive-1")) is True
+    assert len(ui.sent) == 1
+    assert llm.kwargs[-1]["proactive"] is True
+
+    llm.reply_text = "[不回复]"
+    assert agent.handle_event(make_event("笑死，太离谱了", external_id="proactive-2")) is False
+    assert len(ui.sent) == 1
+    assert agent.storage.recent_reply_records(1)[0]["reason"] == "proactive_declined"
+
+
+def test_daily_training_export_runs_once_for_today(tmp_path):
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'memory.db'}",
+        wechat_group_name="测试群",
+        wechat_ai_aliases=["AI"],
+        wechat_allow_send=False,
+        wechat_stop_file=tmp_path / "STOP",
+        group_style_enabled=False,
+        embedding_enabled=False,
+        openviking_enabled=False,
+        training_export_enabled=True,
+        training_export_dir=str(tmp_path / "daily"),
+        training_export_hour=0,
+        training_export_minute=0,
+        training_export_context_messages=2,
+    )
+    agent = WeChatAgent(settings, ui=FakeUi(), llm=FakeLlm())
+    agent.storage.record_message(make_event("今天好累", external_id="daily-1"))
+
+    agent._maybe_export_daily_training()
+
+    day = datetime.now().astimezone().date().isoformat()
+    target = tmp_path / "daily" / day
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["messages"] == 1
+    assert (target / ".exported").exists()
+
+    # A restart/second poll on the same day must not export duplicate files.
+    before = (target / "style_corpus.jsonl").read_text(encoding="utf-8")
+    agent._maybe_export_daily_training()
+    assert (target / "style_corpus.jsonl").read_text(encoding="utf-8") == before
+
+
 def test_ui_startup_baseline_does_not_reappear_on_next_poll():
     adapter = object.__new__(WeixinUiAdapter)
     adapter.settings = type(
@@ -154,12 +230,30 @@ def test_ui_startup_baseline_does_not_reappear_on_next_poll():
     adapter._group_open = True
     adapter._primed = False
     adapter._seen_keys = set()
-    messages = [UiMessage(sender="成员", text="历史消息", fingerprint="history")]
+    messages = [
+        UiMessage(
+            sender="成员",
+            text="历史消息",
+            fingerprint="history",
+            group_name="显示群名",
+            group_id="wxid_group_a",
+        )
+    ]
     adapter.read_messages = lambda: list(messages)
 
     assert adapter.poll("a") == []
     assert adapter.poll("a") == []
 
-    messages.append(UiMessage(sender="成员", text="@AI 新问题", fingerprint="new"))
+    messages.append(
+        UiMessage(
+            sender="成员",
+            text="@AI 新问题",
+            fingerprint="new",
+            group_name="显示群名",
+            group_id="wxid_group_a",
+        )
+    )
     events = adapter.poll("a")
     assert [event.text for event in events] == ["@AI 新问题"]
+    assert events[0].group_id == "wxid_group_a"
+    assert events[0].group_name == "显示群名"

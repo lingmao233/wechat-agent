@@ -2,9 +2,11 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- The Python prototype keeps embeddings optional so SQLite can be used for
--- local tests. This migration adds the production vector column and index.
+-- local tests. The configured Ark model (doubao-embedding-vision-251215)
+-- currently returns 2048 dimensions; change this dimension together with
+-- EMBED_DIMENSION and the deployed model before applying a different model.
 ALTER TABLE memory_facts
-    ADD COLUMN IF NOT EXISTS embedding vector(1024);
+    ADD COLUMN IF NOT EXISTS embedding vector(2048);
 
 CREATE INDEX IF NOT EXISTS memory_facts_embedding_hnsw
     ON memory_facts USING hnsw (embedding vector_cosine_ops);

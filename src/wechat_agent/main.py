@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, time, timedelta, timezone
 import json
 import logging
 import sys
@@ -14,11 +15,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Guarded Weixin 4.1.x AI test-group agent")
     parser.add_argument(
         "command",
-        choices=["ready", "run", "init-db", "desktop"],
+        choices=["ready", "run", "init-db", "desktop", "rebuild-memory", "export-training-data"],
         nargs="?",
         default="ready",
     )
     parser.add_argument("--config", help="optional .env path", default=None)
+    parser.add_argument("--window", type=int, help="messages used to rebuild group profiles")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="export directory; --today defaults to data/training/daily/<date>",
+    )
+    parser.add_argument(
+        "--today",
+        action="store_true",
+        help="export only messages from the local calendar day (for nightly jobs)",
+    )
+    parser.add_argument(
+        "--context",
+        type=int,
+        default=6,
+        help="prior messages per exported behavior example",
+    )
+    parser.add_argument(
+        "--no-anonymize",
+        action="store_true",
+        help="keep real member/group names in the local training export",
+    )
     parser.add_argument("--allow-send", action="store_true", help="enable sending; requires group allowlist")
     parser.add_argument("--stop", action="store_true", help="create the configured STOP file and exit")
     parser.add_argument("--host", help="desktop console bind host")
@@ -59,9 +82,40 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "export-training-data":
+        from .storage import Storage
+        from .training_data import export_training_data
+
+        storage = Storage(settings)
+        storage.init_schema()
+        since = until = None
+        if args.today:
+            now = datetime.now().astimezone()
+            day = now.date()
+            start = datetime.combine(day, time.min, tzinfo=now.tzinfo)
+            since = start.astimezone(timezone.utc)
+            until = (start + timedelta(days=1)).astimezone(timezone.utc)
+            out = args.out or f"data/training/daily/{day.isoformat()}"
+        else:
+            out = args.out or "data/training"
+        report = export_training_data(
+            storage,
+            out,
+            window_messages=args.context,
+            anonymize=not args.no_anonymize,
+            since=since,
+            until=until,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
     agent = WeChatAgent(settings)
     if args.command == "init-db":
         print("database schema initialized")
+        return 0
+    if args.command == "rebuild-memory":
+        report = agent.rebuild_memory(window_messages=args.window)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     if args.command == "ready":
         print(json.dumps(agent.ready(), ensure_ascii=False, indent=2))

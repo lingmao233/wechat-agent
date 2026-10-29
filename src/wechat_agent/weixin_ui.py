@@ -5,7 +5,7 @@ import logging
 import queue
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 import unicodedata
 
@@ -21,12 +21,22 @@ try:  # The mature 4.1.x bridge can materialize Qt's hidden accessibility tree.
 except ImportError:  # pragma: no cover - installation guard on non-Windows hosts
     _ReplicaWeChatUIA = None  # type: ignore[assignment,misc]
 
+try:  # Coordinate/OCR sender for Weixin 4.1.x's self-rendered chat surface.
+    from wechatauto.guia import WeChatGUI as _WeChatGUI
+except ImportError:  # pragma: no cover - optional on non-Windows/test hosts
+    _WeChatGUI = None  # type: ignore[assignment,misc]
+
 try:  # The same bridge exposes the encrypted local message database reader.
     from wechatauto.db import Listener as _WeChatListener
     from wechatauto.db import WeChatDB as _WeChatDB
 except ImportError:  # pragma: no cover - installation guard on non-Windows hosts
     _WeChatListener = None  # type: ignore[assignment,misc]
     _WeChatDB = None  # type: ignore[assignment,misc]
+
+try:
+    from wechatauto.media import MediaDownloader as _MediaDownloader
+except ImportError:  # pragma: no cover - optional on non-Windows/test hosts
+    _MediaDownloader = None  # type: ignore[assignment,misc]
 
 from .config import Settings
 from .models import MessageEvent, OutboundAction, QuotedMessage, utc_now
@@ -44,6 +54,12 @@ class UiMessage:
     is_self: bool = False
     quoted_text: str = ""
     quoted_sender: str = ""
+    group_name: str = ""
+    image_paths: list[str] = field(default_factory=list)
+    # Stable WeChat conversation wxid from the message database.  Keep this
+    # after existing fields so older adapters/tests using keyword or positional
+    # construction remain compatible.
+    group_id: str = ""
 
 
 class WeixinUiAdapter:
@@ -67,7 +83,9 @@ class WeixinUiAdapter:
         self._seen_keys: set[str] = set()
         self._message_db = None
         self._db_listener = None
-        self._db_listener_group = ""
+        self._db_listener_group = ""  # legacy: first registered wxid
+        self._db_listener_groups: set[str] = set()
+        self._db_group_names: dict[str, str] = {}
         self._db_message_queue: queue.Queue[dict[str, object]] = queue.Queue()
         self._last_read_from_database = False
         self._db_error_logged = False
@@ -80,6 +98,12 @@ class WeixinUiAdapter:
         self._self_content_cache_at = 0.0
         self._self_content_cache_group = ""
         self._self_content_cache: set[str] = set()
+        self._media_downloader = None
+        # ``WeChatGUI`` is the reliable 4.1.x coordinate/OCR sender.  Keep it
+        # lazy because construction calibrates the desktop layout and should
+        # not happen during read-only startup or tests.
+        self._gui_sender = None
+        self._gui_sender_error = ""
 
     def connect(self) -> None:
         self.window = self._find_window()
@@ -132,14 +156,14 @@ class WeixinUiAdapter:
             "window_class": self.window.ClassName,
             "window_name": self.window.Name,
             "process_id": str(self.window.ProcessId),
-            "group_configured": self.settings.wechat_group_name,
+            "group_configured": ", ".join(self._configured_groups()),
         }
 
     def open_group(self, group_name: str | None = None) -> None:
         self._require_window()
         name = (group_name or self.settings.wechat_group_name).strip()
         if not name:
-            raise ValueError("WECHAT_GROUP_NAME 必须设置为专用测试群名称")
+            raise ValueError("WECHAT_GROUP_NAMES 必须设置至少一个专用测试群名称")
         self._click_first(
             self.window.ButtonControl(Name="微信", ClassName="mmui::XTabBarItem")
         )
@@ -167,18 +191,52 @@ class WeixinUiAdapter:
         confirmation used by the previously working agent.
         """
 
+        # Generated images must remain native image messages.  The legacy UIA
+        # bridge can only paste text, so never fall back to sending a local
+        # path or URL as chat text.
+        if action.media_paths:
+            self._send_with_gui(action)
+            self._group_open = True
+            return
+
+        # Prefer the coordinate/OCR route.  It has its own input-state checks,
+        # retry loop and optional database read-back, which fixes the common
+        # 4.1.x failure where UIA reports a click but the rendered input box
+        # never received the text.
+        if self._get_gui_sender() is not None:
+            self._send_with_gui(action)
+            self._group_open = True
+            return
+
         if _ReplicaWeChatUIA is None:
-            raise RuntimeError("缺少 wechatauto-replica 的 WeChatUIA 发送驱动")
+            detail = self._gui_sender_error or "缺少可用的 WeChatGUI/WeChatUIA 发送驱动"
+            raise RuntimeError(detail)
         db = self._get_message_db()
         target_wxid = self._resolve_group_wxid(db, action.group_name)
         before = db.get_messages(target_wxid, limit=1)
         before_seq = int(before[0].get("sort_seq") or 0) if before else 0
 
         sender = _ReplicaWeChatUIA(timeout=15.0, search_timeout=2.0)
-        if not sender.send_text_to(action.text, action.group_name):
+        attempts = max(1, int(getattr(self.settings, "wechat_send_retry_count", 3)))
+        sent = False
+        for attempt in range(attempts):
+            if sender.send_text_to(action.text, action.group_name):
+                sent = True
+                break
+            if attempt + 1 < attempts:
+                log.warning(
+                    "Weixin UIA text send retry=%s/%s group=%s",
+                    attempt + 2,
+                    attempts,
+                    action.group_name,
+                )
+                time.sleep(0.5)
+        if not sent:
             raise RuntimeError(f"Weixin UIA 未确认发送到群：{action.group_name}")
 
-        deadline = time.monotonic() + 8.0
+        deadline = time.monotonic() + float(
+            getattr(self.settings, "wechat_send_verify_seconds", 15.0)
+        )
         while time.monotonic() < deadline:
             for message in db.get_messages(target_wxid, limit=20):
                 sequence = int(message.get("sort_seq") or 0)
@@ -199,6 +257,87 @@ class WeixinUiAdapter:
             f"Weixin UIA 已返回发送成功，但数据库未回读到机器人消息：{action.group_name}"
         )
 
+    def _get_gui_sender(self):
+        """Create the coordinate/OCR sender once, without affecting read-only mode."""
+
+        if self._gui_sender is not None:
+            return self._gui_sender
+        if _WeChatGUI is None:
+            self._gui_sender_error = "未安装 wechatauto.guia.WeChatGUI"
+            return None
+        try:
+            self._gui_sender = _WeChatGUI()
+            return self._gui_sender
+        except Exception as exc:  # noqa: BLE001 - preserve fallback diagnostics
+            self._gui_sender_error = f"WeChatGUI 初始化失败：{type(exc).__name__}: {exc}"
+            log.warning("WeChatGUI unavailable: %s", self._gui_sender_error)
+            return None
+
+    @staticmethod
+    def _response_message(response: object) -> str:
+        if isinstance(response, dict):
+            value = response.get("message") or response.get("error") or response
+            return str(value)
+        return str(response)
+
+    def _send_with_gui(self, action: OutboundAction) -> None:
+        """Send text or native image attachments through ``WeChatGUI``.
+
+        ``send_msg``/``send_image`` return ``WxResponse`` objects whose
+        truthiness means the provider confirmed success.  The adapter accepts
+        simple boolean fakes as well, making this path unit-testable without a
+        live Weixin process.
+        """
+
+        sender = self._get_gui_sender()
+        if sender is None:
+            raise RuntimeError(self._gui_sender_error or "WeChatGUI 不可用，无法发送图片附件")
+        verify = True
+        attempts = max(1, int(self.settings.wechat_send_retry_count))
+        last_detail = "未知发送错误"
+        for index, path in enumerate(action.media_paths):
+            response = None
+            try:
+                response = sender.send_image(path, action.group_name, verify=verify)
+            except Exception as exc:  # noqa: BLE001 - surface driver failure
+                last_detail = f"图片发送异常：{type(exc).__name__}: {exc}"
+            else:
+                if bool(response):
+                    continue
+                last_detail = f"图片发送失败：{self._response_message(response)}"
+            # A failed response can mean the image was sent but read-back was
+            # delayed.  Retry only the configured bounded number of times;
+            # never switch to text/UIA and never expose a local path in chat.
+            for retry in range(1, attempts):
+                log.warning(
+                    "WeChat image send retry=%s/%s path=%s reason=%s",
+                    retry + 1,
+                    attempts,
+                    path,
+                    last_detail,
+                )
+                try:
+                    response = sender.send_image(path, action.group_name, verify=verify)
+                except Exception as exc:  # noqa: BLE001
+                    last_detail = f"图片发送异常：{type(exc).__name__}: {exc}"
+                    continue
+                if bool(response):
+                    break
+                last_detail = f"图片发送失败：{self._response_message(response)}"
+            else:
+                raise RuntimeError(
+                    f"Weixin 图片附件发送失败（第 {index + 1} 张）：{last_detail}"
+                )
+
+        if action.media_paths:
+            return
+        try:
+            response = sender.send_msg(action.text, action.group_name, verify=verify)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Weixin 文字发送异常：{type(exc).__name__}: {exc}") from exc
+        if not bool(response):
+            raise RuntimeError(f"Weixin 文字发送失败：{self._response_message(response)}")
+
     def _get_message_db(self):
         if self._message_db is None:
             if _WeChatDB is None:
@@ -213,36 +352,53 @@ class WeixinUiAdapter:
             self._replica_driver = _ReplicaWeChatUIA(timeout=15.0, search_timeout=2.0)
         return self._replica_driver
 
-    def _start_db_listener(self, group_name: str) -> bool:
-        """Listen to one database conversation, independent of the open UI tab."""
+    def _configured_groups(self) -> list[str]:
+        groups = getattr(self.settings, "wechat_group_names", None) or [
+            self.settings.wechat_group_name
+        ]
+        return list(dict.fromkeys(str(value).strip() for value in groups if str(value).strip()))
+
+    def _start_db_listeners(self, group_names: list[str] | None = None) -> bool:
+        """Listen to all configured conversations through one DB poller."""
 
         if _WeChatListener is None:
             return False
         db = self._get_message_db()
-        target_wxid = self._resolve_group_wxid(db, group_name)
-        if self._db_listener is not None and self._db_listener_group == target_wxid:
+        names = group_names or self._configured_groups()
+        targets = {self._resolve_group_wxid(db, name): name for name in names}
+        if self._db_listener is not None and set(targets) == self._db_listener_groups:
             return True
         self._stop_db_listener()
-        watermark = None
-        if not self.settings.wechat_skip_existing_on_start:
-            watermark = {target_wxid: 0}
+        watermark = None if self.settings.wechat_skip_existing_on_start else {
+            target: 0 for target in targets
+        }
         listener = _WeChatListener(
             db,
             interval=max(0.5, float(self.settings.wechat_poll_seconds)),
             watermark=watermark,
             watermark_file="",
         )
-        listener.add_listener(target_wxid, self._queue_db_message)
+        for target_wxid in targets:
+            listener.add_listener(target_wxid, self._queue_db_message)
         listener.start()
         self._db_listener = listener
-        self._db_listener_group = target_wxid
-        log.info("WeChat DB listener active group=%s wxid=%s", group_name, target_wxid)
+        self._db_listener_groups = set(targets)
+        self._db_group_names = targets
+        self._db_listener_group = next(iter(targets), "")
+        log.info("WeChat DB listeners active groups=%s", ", ".join(names))
         return True
+
+    def _start_db_listener(self, group_name: str) -> bool:
+        """Compatibility wrapper for callers that start one group."""
+
+        return self._start_db_listeners([group_name])
 
     def _stop_db_listener(self) -> None:
         listener = self._db_listener
         self._db_listener = None
         self._db_listener_group = ""
+        self._db_listener_groups = set()
+        self._db_group_names = {}
         if listener is not None:
             try:
                 listener.stop()
@@ -386,20 +542,51 @@ class WeixinUiAdapter:
             & WeixinUiAdapter._text_variants(expected)
         )
 
+    def _download_db_image(self, row: dict[str, object], conversation_wxid: str) -> list[str]:
+        if not self.settings.wechat_image_recognition_enabled:
+            return []
+        if not conversation_wxid or _MediaDownloader is None:
+            return []
+        try:
+            if self._media_downloader is None:
+                self._media_downloader = _MediaDownloader(
+                    self._get_message_db(), save_dir=str(self.settings.wechat_media_dir)
+                )
+            local_id = int(row.get("local_id") or 0)
+            if not local_id:
+                return []
+            path = self._media_downloader.download_image(
+                conversation_wxid,
+                local_id,
+                save_dir=str(self.settings.wechat_media_dir),
+                tier="best",
+                shard=str(row.get("shard") or "") or None,
+            )
+            return [str(path)] if path else []
+        except Exception:
+            log.debug("微信图片无法从本地附件解密", exc_info=True)
+            return []
+
     def _db_row_to_ui_message(
         self,
         row: dict[str, object],
         self_texts: set[str],
+        group_name: str = "",
     ) -> UiMessage | None:
         text = str(row.get("content") or "").strip()
         if not text or text in {"查看更多消息", "以下为新消息"}:
             return None
         message_type = str(row.get("type") or "").casefold()
-        if message_type and message_type not in {"text", "text_message", "unknown"}:
+        image_types = {"图片", "image", "picture", "pic", "3"}
+        is_image = message_type in image_types or text.startswith("[图片")
+        if message_type and message_type not in {"text", "text_message", "unknown", *image_types}:
             # Keep text rows with an empty/unknown type, but do not turn image,
             # sticker, or system placeholders into member questions.
-            if text.startswith("[") and text.endswith("]"):
+            if text.startswith("[") and text.endswith("]") and not is_image:
                 return None
+        image_paths = self._download_db_image(row, str(row.get("username") or "")) if is_image else []
+        if is_image and not text:
+            text = "[图片]"
         sender_id = str(row.get("sender_username") or "").strip()
         self_wxid, self_name = self._self_identity()
         is_self = bool(sender_id and self_wxid and sender_id == self_wxid)
@@ -435,18 +622,28 @@ class WeixinUiAdapter:
             text=text,
             fingerprint=fingerprint,
             is_self=is_self,
+            group_name=group_name or self._db_group_names.get(str(row.get("username") or ""), ""),
+            image_paths=image_paths,
+            group_id=str(row.get("username") or "").strip(),
         )
 
-    def _read_database_messages(self, group_name: str, limit: int = 30) -> list[UiMessage] | None:
+    def _read_database_messages(self, group_names: list[str], limit: int = 30) -> list[UiMessage] | None:
         if _WeChatListener is None:
             return None
         try:
-            self._start_db_listener(group_name)
+            self._start_db_listeners(group_names)
             rows = self._drain_db_messages(limit)
-            self_texts = self._db_self_content(group_name)
+            allowed = {
+                self._resolve_group_wxid(self._get_message_db(), name): name for name in group_names
+            }
+            self_texts = {name: self._db_self_content(name) for name in group_names}
             messages: list[UiMessage] = []
             for row in rows:
-                message = self._db_row_to_ui_message(row, self_texts)
+                username = str(row.get("username") or "")
+                group_name = allowed.get(username) or self._db_group_names.get(username, "")
+                if not group_name:
+                    continue
+                message = self._db_row_to_ui_message(row, self_texts.get(group_name, set()), group_name)
                 if message is not None:
                     messages.append(message)
             self._db_error_logged = False
@@ -520,12 +717,12 @@ class WeixinUiAdapter:
             log.debug("UIA 回退无法打开配置群 %s", group, exc_info=True)
             return False
 
-    def _read_visible_messages(self, limit: int = 30) -> list[UiMessage]:
+    def _read_visible_messages(self, limit: int = 30, group_name: str | None = None) -> list[UiMessage]:
         self._require_window()
         page = self.window.GroupControl(AutomationId="chat_message_page")
         if not page.Exists(1):
             return []
-        group_name = self.settings.wechat_group_name.strip()
+        group_name = (group_name or self.settings.wechat_group_name).strip()
         self_texts = self._db_self_content(group_name) if group_name else set()
         rows = page.GetChildren()
         parsed: list[UiMessage] = []
@@ -548,6 +745,10 @@ class WeixinUiAdapter:
             fingerprint = hashlib.sha256(
                 f"{sender}\x1f{text}\x1f{quoted_sender}\x1f{quoted_text}".encode("utf-8")
             ).hexdigest()
+            try:
+                visible_group_id = self._resolve_group_wxid(self._get_message_db(), group_name)
+            except Exception:
+                visible_group_id = ""
             parsed.append(
                 UiMessage(
                     sender=sender,
@@ -557,46 +758,53 @@ class WeixinUiAdapter:
                     is_self=is_self,
                     quoted_text=quoted_text,
                     quoted_sender=quoted_sender,
+                    group_name=group_name,
+                    group_id=visible_group_id,
                 )
             )
         return parsed
 
     def read_messages(self, limit: int = 30) -> list[UiMessage]:
-        """Read target-group messages from DB, falling back to verified UIA rows."""
+        """Read all configured-group messages from DB, with UIA fallback."""
 
-        group_name = self.settings.wechat_group_name.strip()
+        group_names = self._configured_groups()
         self._last_read_from_database = False
-        if group_name:
-            database_messages = self._read_database_messages(group_name, limit=limit)
+        if group_names:
+            database_messages = self._read_database_messages(group_names, limit=limit)
             if database_messages is not None:
                 self._last_read_from_database = True
                 return database_messages
-            if not self._ensure_visible_group(group_name):
-                return []
+            visible: list[UiMessage] = []
+            for group_name in group_names:
+                if self._ensure_visible_group(group_name):
+                    visible.extend(self._read_visible_messages(limit=limit, group_name=group_name))
+            return visible
         return self._read_visible_messages(limit=limit)
 
     def poll(self, account_id: str, group_name: str | None = None) -> list[MessageEvent]:
-        """Read one configured group and deduplicate rows.
+        """Read all configured groups and deduplicate rows.
 
         When the DB listener is active, the selected Weixin tab is irrelevant.
         UIA rows are accepted only after the fallback verifies the visible chat.
         """
-        group = (group_name or self.settings.wechat_group_name).strip()
+        requested_group = (group_name or "").strip()
         events: list[MessageEvent] = []
         for msg in self.read_messages():
-            key = f"{group}\x1f{msg.fingerprint}"
+            group_name = msg.group_name or requested_group or self.settings.wechat_group_name.strip()
+            group_id = msg.group_id or group_name
+            if not group_id:
+                continue
+            key = f"{group_id}\x1f{msg.fingerprint}"
             if key in self._seen_keys:
                 continue
             self._seen_keys.add(key)
             events.append(
                 MessageEvent(
                     account_id=account_id,
-                    # Keep the configured group label as the storage namespace
-                    # for compatibility with existing reply/memory rows. The
-                    # actual listener target remains the resolved wxid in
-                    # ``_db_listener_group``.
-                    group_id=group,
-                    group_name=group,
+                    # Use the stable wxid as the memory/authorization scope;
+                    # keep the display label separately for outbound UI work.
+                    group_id=group_id,
+                    group_name=group_name or group_id,
                     member_id=msg.sender_id or msg.sender,
                     member_name=msg.sender or msg.sender_id or "unknown",
                     text=msg.text,
@@ -604,6 +812,7 @@ class WeixinUiAdapter:
                     source="weixin_ui_4.1",
                     external_message_id=msg.fingerprint,
                     is_self=msg.is_self,
+                    image_paths=list(msg.image_paths or []),
                     reply_to=(
                         QuotedMessage(text=msg.quoted_text, sender_name=msg.quoted_sender)
                         if msg.quoted_text
