@@ -6,15 +6,20 @@
 # Python environments and caches
 .venv/
 venv/
+*.egg-info/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
+# 测试只在本地保留，不纳入仓库
+tests/
+
 # Runtime state, databases, logs, and debug output
 state/
 runtime/
+data/
 logs/
 *.log
 *.out
