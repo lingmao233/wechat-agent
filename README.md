@@ -170,7 +170,6 @@ Embedding 配置沿用运行机器 `.env` 中的 `EMBED_*` 或现有 `WORKHUB_EM
 - `src/wechat_agent/platforms/`：抖音/小红书统一适配层；默认 dry-run，可显式开启 Playwright 可见浏览器
 - `docs/PLATFORM_ADAPTERS.md`：抖音/小红书浏览器登录、滚动读取、评论队列和安全边界
 - `docs/DEPLOYMENT.md`：Windows 微信连接器与服务器核心的 24 小时拓扑
-- `tests/`：不连接微信的 Embedding 契约、OpenViking 作用域、画像更新、无关上下文、时间召回和策略测试
 
 ## 已知限制
 

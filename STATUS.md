@@ -28,7 +28,6 @@
 | [`src/wechat_agent/web_research.py`](src/wechat_agent/web_research.py) | DSH 同款 DeepSeek relay、Brave/Tavily/SearXNG 搜索、公开网页正文抓取（可选域名收窄），以及当前已登录平台公开条目/评论的临时上下文 |
 | [`migrations/001_pgvector.sql`](migrations/001_pgvector.sql) | PostgreSQL/pgvector 迁移草案 |
 | [`migrations/004_image_paths.sql`](migrations/004_image_paths.sql) | 为已有 PostgreSQL 消息表增加图片附件路径元数据列 |
-| [`tests/`](tests/) | 记忆隔离、时间召回、去重、策略和无 Key stub 测试 |
 
 ## 已验证结果
 
